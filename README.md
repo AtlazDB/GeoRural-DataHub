@@ -75,6 +75,22 @@ Desenvolvimento do **GeoRural DataHub**, uma plataforma web com **Spring Boot** 
 - **`database/`**: Scripts DDL do Oracle Database, incluindo definições de `SDO_GEOMETRY`, triggers, procedures PL/SQL para validação de geometrias e rastreabilidade de dados.
 - **`Documentacao/`**: Documentação técnica, especificações de arquitetura e relatórios das Sprints.
 
+## 🚀 Rodando tudo localmente <a id="rodar"></a>
+
+Um comando sobe o ambiente inteiro (Oracle, Airflow, back-end e front-end), no Windows, com o **Docker Desktop** aberto:
+
+```powershell
+git submodule update --init   # só na primeira vez: baixa o back e o front
+.\build                       # sobe tudo
+.\stop                        # desliga tudo (os dados do banco são mantidos)
+```
+
+O `.\build` espera o Oracle ficar pronto e abre o back (`http://localhost:8080/api/v1`) e o front (`http://localhost:5173`) em janelas próprias, cada uma com os seus logs. O Airflow (`http://localhost:8088`) só sobe se existir o `infra/airflow/.env.local`; use `.\build -SemAirflow` para pular. Se o back ou o front já estiverem rodando, o script não abre outra cópia.
+
+Antes da primeira vez, siga a configuração de cada parte: o `.env` e a credencial da OCI no README do back-end, e o `.env.local` em `infra/airflow`.
+
+Se você trabalha com o back e o front em outras pastas, ou sobe o back com outro comando, copie `build.local.example.ps1` para `build.local.ps1` e ajuste. Esse arquivo é só da sua máquina e não vai para o git.
+
 ## 📂 Documentação <a id="docs"></a>
 
 * 📃 [**Checklist DoR & DoD**](./Documentacao/Processo/Checklist/README.md) - Critérios de início e conclusão de tarefas.
