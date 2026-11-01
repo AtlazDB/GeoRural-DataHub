@@ -25,6 +25,10 @@ CONJUNTO_DA_TABELA = {
     "foco_calor": "focos_calor",
     "municipio": "municipios",
 }
+# Tabela genérica das fontes novas (V20): cada fonte é um conjunto, "insumo_<sigla>". Na
+# carga-retrato o pkg_tratada.gravar_aprovados apaga as versões anteriores do conjunto: com o
+# nome da tabela como conjunto, a carga de uma fonte apagaria os dados de todas as outras.
+TABELA_INSUMO = "input_feature"
 # Tabela de destino gravada na quarentena (registro_quarentena.entidade), a mesma da regra_campo
 ENTIDADE_IMOVEIS = "imovel_rural"
 # Quem aparece como autor da análise nos registros que a própria DAG descarta. O começo
@@ -158,6 +162,13 @@ def iniciar_execucao(con, arquivo_id: int, dag_run_id: str | None) -> int:
         execucao_id = int(id_var.getvalue()[0])
     con.commit()
     return execucao_id
+
+
+def conjunto_da_carga(tabela: str, sigla_fonte: str) -> str:
+    """O conjunto (dataset_versao.conjunto) da carga: por fonte na input_feature, pela tabela nas demais."""
+    if tabela == TABELA_INSUMO:
+        return f"insumo_{sigla_fonte.lower()}"
+    return CONJUNTO_DA_TABELA.get(tabela, tabela)
 
 
 def criar_versao(cur, execucao_id: int, conjunto: str = CONJUNTO_IMOVEIS) -> Versao:
