@@ -114,15 +114,11 @@ espaciais. A plataforma:
 > Como Operador de Dados, quero que os arquivos sejam processados e validados antes de ficarem
 > disponíveis, para que só dados confiáveis cheguem à consulta.
 
-- O sistema processa três tipos de arquivo, conforme a sigla da fonte:
-
-  | Fonte | Conteúdo | Arquivo esperado |
-  |---|---|---|
-  | `CAR` | Imóveis rurais | `.zip` com shapefile (`.shp`, `.shx`, `.dbf`, `.prj`) |
-  | `CAR-RL` | Reserva Legal dos imóveis | `.zip` com shapefile |
-  | `INPE-FOCOS` | Focos de calor | `.csv` do INPE, puro ou dentro de um `.zip` |
-
-- O processamento começa sozinho assim que o envio termina, sem outra ação do Operador.
+- O sistema processa arquivos de qualquer fonte, guiado pelo mapeamento de colunas: `.zip` com
+  shapefile (`.shp`, `.shx`, `.dbf`, `.prj`) ou com as páginas GeoJSON da coleta por link, e
+  `.geojson`/`.json`.
+- O processamento começa sozinho (pelo Airflow) assim que o arquivo chega, sem outra ação do
+  Operador.
 - Cada registro é validado. No CAR, por exemplo: código vazio ou repetido, geometria ausente, que
   não seja polígono, inválida ou totalmente fora do Paraná. Os reprovados vão para a
   **quarentena**, com o tipo de erro e o motivo; os demais são gravados.
@@ -225,11 +221,10 @@ espaciais. A plataforma:
 - Estrutura do banco versionada com Flyway (criada automaticamente na primeira subida).
 - API REST em JSON; geometrias em GeoJSON.
 - Arquivos originais guardados na zona bruta do Object Storage da Oracle Cloud (OCI).
-- O processamento e a coleta podem ser feitos por um orquestrador **Apache Airflow**
-  (`AIRFLOW_HABILITADO=true`, configurado em `infra/airflow` neste repositório). Sem ele, o próprio
-  back-end processa as fontes `CAR`, `CAR-RL` e `INPE-FOCOS` e coleta os links na hora. Com ele, o
-  back-end só registra os pedidos e o Airflow faz o trabalho: processa qualquer fonte pelo
-  mapeamento de colunas, coleta os links em páginas e recalcula os indicadores ao final.
+- O processamento e a coleta são feitos pelo orquestrador **Apache Airflow** (configurado em
+  `infra/airflow` neste repositório). O back-end só registra os pedidos e o Airflow faz o trabalho:
+  processa qualquer fonte pelo mapeamento de colunas, coleta os links em páginas e recalcula os
+  indicadores ao final.
 
 **Integridade e rastreabilidade dos dados**
 - O processamento de um arquivo é transacional: se ocorrer erro, nenhum dado parcial é gravado.
@@ -278,9 +273,8 @@ o Object Storage.
 
 1. Clone o repositório `Atlaz4-BackEnd`.
 2. Copie o `.env.example` para `.env`, na raiz do projeto, e preencha `OCI_NAMESPACE`,
-   `OCI_BUCKET`, `DB_USERNAME` e `DB_PASSWORD`. Deixe `AIRFLOW_HABILITADO=false` para o próprio
-   back-end processar os arquivos. Para usar o Airflow, siga o `infra/airflow/README.md` deste
-   repositório e troque para `AIRFLOW_HABILITADO=true`.
+   `OCI_BUCKET`, `DB_USERNAME` e `DB_PASSWORD`. Para processar e coletar, suba também o Airflow
+   (`infra/airflow/README.md` deste repositório).
 3. Configure a credencial da OCI em `~/.oci/config`, no perfil `DEFAULT`. **Sem esse arquivo a
    aplicação não inicia**, mesmo que você não vá enviar arquivos.
 4. Suba o banco: `docker compose up -d`. A primeira subida demora alguns minutos; o banco está
@@ -307,19 +301,19 @@ o Object Storage.
 
 ### Primeira carga de dados
 
-Com o banco vazio, carregue os dados nesta ordem — cada etapa depende da anterior:
+Com o banco vazio e o Airflow ligado, carregue os dados nesta ordem — cada etapa depende da anterior:
 
-1. **Malha municipal do Paraná (IBGE).** Sem ela, a lista de municípios fica vazia e a conferência
-   "está no Paraná" não funciona. Envie o GeoJSON dos municípios para a fonte `IBGE` e faça a carga
-   pela API: `POST /api/v1/pipeline/carga/municipios?arquivoBrutoId=<id do arquivo>`, com o
-   GeoJSON no corpo. (Ainda não há botão na tela para essa carga.)
-2. **Imóveis do CAR:** envie o `.zip` do shapefile para a fonte `CAR`.
-3. **Reserva Legal:** envie o `.zip` do shapefile para a fonte `CAR-RL`. O SICAR entrega a RL em
-   GeoPackage; converta para shapefile e compacte (`.shp`, `.shx`, `.dbf`, `.prj`, `.cpg`) antes.
-4. **Focos de calor:** envie o `.csv` do INPE (pastas `diario/` ou `mensal/` do dataserver) para a
-   fonte `INPE-FOCOS`.
-5. **Indicadores:** na tela Imóveis rurais, selecione um imóvel e clique em **Calcular
-   indicadores** (ou **Recalcular**). O cálculo é feito para todos os imóveis de uma vez.
+1. **Cadastre as fontes por link:** rode uma vez o `db/seed-demo/fontes.sql` do back-end. Ele
+   cadastra as fontes `MUN-IAT`, `CAR-WFS`, `RL-IAT` e `FOCOS-IAT` já com o mapeamento de colunas.
+2. **Malha municipal do Paraná:** clique em **Executar** na fonte `MUN-IAT` e espere o arquivo
+   ficar `PROCESSADO`. Sem ela, a lista de municípios fica vazia e a conferência "está no Paraná"
+   não funciona.
+3. **Imóveis do CAR:** **Executar** na fonte `CAR-WFS` (a coleta do Paraná inteiro demora).
+4. **Reserva Legal e focos de calor:** **Executar** nas fontes `RL-IAT` e `FOCOS-IAT`. Os
+   indicadores IRL e IFC são recalculados ao final de cada carga.
+5. **Indicadores (opcional):** para recalcular na hora, na tela Imóveis rurais, selecione um
+   imóvel e clique em **Calcular indicadores** (ou **Recalcular**). O cálculo é feito para todos os
+   imóveis de uma vez.
 
 
 ## Como usar
@@ -356,14 +350,14 @@ card **Importar arquivo** e, abaixo dele, os **Arquivos recebidos** da fonte sel
    selecionar", ou clique nela, e depois em **Iniciar importação**. Para escolher outro arquivo,
    use **Trocar arquivo**. A barra mostra o progresso do envio e, em seguida, "Processando no
    servidor…".
-3. **Processamento automático:** se o arquivo for de uma fonte processável (`CAR` ou `CAR-RL` em
-   `.zip`; `INPE-FOCOS` em `.csv` ou `.zip`), o processamento começa sozinho assim que o envio
-   termina.
+3. **Processamento automático:** arquivos `.zip`, `.geojson` e `.json` entram na fila do Airflow
+   assim que o envio termina ("Na fila do Airflow: o processamento começa em até 2 minutos").
 4. **Acompanhar o status** na lista **Arquivos recebidos**: Recebido, Processando, Processado,
    Rejeitado ou Aguardando mapeamento. Enquanto houver arquivo processando, a lista se atualiza
    sozinha a cada poucos segundos.
-5. **Ver o resultado:** ao concluir, aparece "Processado: X lidos · Y válidos · Z inválidos" ou
-   "Rejeitado:" seguido do motivo. Os registros inválidos ficam na [Quarentena](#quarentena).
+5. **Ver o resultado:** ao concluir, aparece "Processado pelo Airflow" ou "Rejeitado no
+   processamento" (o motivo fica registrado na execução). Os registros inválidos ficam na
+   [Quarentena](#quarentena).
 6. **Processar de novo**, se necessário: arquivos Recebidos, Rejeitados ou Aguardando mapeamento
    mostram o botão **Processar**.
 7. **Excluir** um arquivo rejeitado: o botão **Excluir** aparece só em arquivos Rejeitados. A
@@ -371,8 +365,8 @@ card **Importar arquivo** e, abaixo dele, os **Arquivos recebidos** da fonte sel
 
 **Cadastrar uma nova fonte:**
 
-As fontes usadas pela aplicação (`CAR`, `CAR-RL`, `INPE-FOCOS`, `IBGE`) já vêm cadastradas. Para
-cadastrar outra:
+As fontes por link da demonstração (`MUN-IAT`, `CAR-WFS`, `RL-IAT`, `FOCOS-IAT`) são cadastradas
+pelo seed (veja [Primeira carga de dados](#primeira-carga-de-dados)). Para cadastrar outra:
 
 1. Clique em **Nova fonte** (o botão vira **Fechar** enquanto o formulário está aberto).
 2. Preencha **Nome da fonte**, **Sigla** (até 12 caracteres, sem repetir uma existente),
