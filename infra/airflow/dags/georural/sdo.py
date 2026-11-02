@@ -1,4 +1,4 @@
-"""Conversão de polígonos do shapely para SDO_GEOMETRY do Oracle.
+"""Conversão de geometrias do shapely para SDO_GEOMETRY do Oracle (polígono, ponto e linha).
 
 Por que não mandar WKB e converter no banco (como o Java faz com SDO_GEOMETRY(blob, srid)):
 o python-oracledb em modo thin envia bytes como RAW, que tem limite de 32 KB, e os imóveis
@@ -14,8 +14,14 @@ from shapely.geometry.base import BaseGeometry
 
 SRID_BANCO = 4326
 
-GTYPE_POLIGONO = 2003       # 2 = duas dimensões, 003 = polígono
+GTYPE_PONTO = 2001          # 2 = duas dimensões, 001 = ponto
+GTYPE_LINHA = 2002
+GTYPE_POLIGONO = 2003       # 003 = polígono
+GTYPE_MULTIPONTO = 2005
+GTYPE_MULTILINHA = 2006
 GTYPE_MULTIPOLIGONO = 2007  # 007 = multipolígono
+ETYPE_PONTO = 1
+ETYPE_LINHA = 2
 ETYPE_ANEL_EXTERNO = 1003
 ETYPE_BURACO = 2003
 INTERPRETACAO_RETAS = 1     # vértices ligados por segmentos de reta
@@ -27,12 +33,24 @@ def elementos(geometria: BaseGeometry) -> tuple[int, list[int], list[float]]:
     Cada anel vira um trio no ELEM_INFO: (posição do primeiro valor em ORDINATES, tipo, 1).
     ORDINATES é a lista corrida x1, y1, x2, y2... de todos os anéis.
     """
+    if geometria.geom_type in ("Point", "MultiPoint"):
+        pontos = shapely.get_coordinates(geometria).ravel().tolist()
+        if geometria.geom_type == "Point":
+            return GTYPE_PONTO, [1, ETYPE_PONTO, 1], pontos
+        return GTYPE_MULTIPONTO, [1, ETYPE_PONTO, len(pontos) // 2], pontos
+    if geometria.geom_type in ("LineString", "MultiLineString"):
+        linhas = list(geometria.geoms) if geometria.geom_type == "MultiLineString" else [geometria]
+        elem_info, ordenadas = [], []
+        for linha in linhas:
+            elem_info += [len(ordenadas) + 1, ETYPE_LINHA, INTERPRETACAO_RETAS]
+            ordenadas += shapely.get_coordinates(linha).ravel().tolist()
+        return (GTYPE_LINHA if len(linhas) == 1 else GTYPE_MULTILINHA), elem_info, ordenadas
     if geometria.geom_type == "Polygon":
         poligonos, gtype = [geometria], GTYPE_POLIGONO
     elif geometria.geom_type == "MultiPolygon":
         poligonos, gtype = list(geometria.geoms), GTYPE_MULTIPOLIGONO
     else:
-        raise ValueError(f"Só polígonos são convertidos, veio {geometria.geom_type}")
+        raise ValueError(f"Tipo de geometria sem conversão: {geometria.geom_type}")
 
     elem_info: list[int] = []
     ordenadas: list[float] = []
@@ -52,7 +70,13 @@ class TiposSdo:
         self._elem_info = con.gettype("MDSYS.SDO_ELEM_INFO_ARRAY")
         self._ordenadas = con.gettype("MDSYS.SDO_ORDINATE_ARRAY")
 
-    def converter(self, geometria: BaseGeometry, srid: int):
+    def converter(self, geometria: BaseGeometry | None, srid: int = SRID_BANCO):
+        """O objeto SDO_GEOMETRY (None para geometria nula ou vazia). Polígono vai no sentido que o
+        Oracle exige (anel externo anti-horário)."""
+        if geometria is None or geometria.is_empty:
+            return None
+        if geometria.geom_type in ("Polygon", "MultiPolygon"):
+            geometria = shapely.orient_polygons(geometria, exterior_cw=False)
         gtype, elem_info, ordenadas = elementos(geometria)
         objeto = self.geometria.newobject()
         objeto.SDO_GTYPE = gtype

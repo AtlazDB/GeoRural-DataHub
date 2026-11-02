@@ -3,6 +3,7 @@ pkg_quality.validate tinha e que a carga e o Revalidar precisam manter."""
 
 import re
 from datetime import datetime
+from decimal import Decimal
 
 import numpy as np
 import pandas as pd
@@ -195,7 +196,8 @@ def test_quarentena_junta_os_motivos_e_guarda_o_primeiro_erro():
 
 def test_converter_para_o_tipo_do_destino():
     assert regras.converter(" 12 ", _regra("x", "INTEIRO")) == 12
-    assert regras.converter("25,9", _regra("x", "DECIMAL", formato="VIRGULA")) == 25.9
+    assert regras.converter("25,9", _regra("x", "DECIMAL", formato="VIRGULA")) == Decimal("25.9")
+    assert regras.converter("487.38854000000003", _regra("x", "DECIMAL")) == Decimal("487.38854000000003")
     assert regras.converter("N/A", _regra("x", "DECIMAL")) is None
     assert regras.converter("Não", _regra("x", "BOOLEANO")) == 0
     assert regras.converter("11/12/2025 17:11:00",
@@ -209,3 +211,12 @@ def test_campos_derivados():
     assert regras.campos_derivados("imovel_rural", {"cod_imovel": "PR-4113700-ABC"}) == {"estado": "PR"}
     assert regras.campos_derivados("municipio", {"cod_ibge": "4115200"}) == {"estado": "PR"}
     assert regras.campos_derivados("municipio", {"cod_ibge": "4115200", "estado": "SC"}) == {}
+
+
+def test_repetidas_no_arquivo_inteiro_valem_dentro_do_bloco():
+    lista = [_regra("cod", chave=True)]
+    v = _validar([{"cod": "A"}, {"cod": "B"}], lista)
+    assert v.erros.empty
+    textos = pd.DataFrame([{"cod": "A"}, {"cod": "B"}])
+    v = regras.validar(textos, np.array([None, None], dtype=object), lista, Contexto(), repetidas={"B"})
+    assert _erros(v) == [(1, "CHAVE_NATURAL_DUPLICADA", "cod")]

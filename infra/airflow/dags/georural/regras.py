@@ -25,8 +25,10 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 import numpy as np
+import oracledb
 import pandas as pd
 import shapely
 import shapely.errors
@@ -256,10 +258,38 @@ def fora_do_recorte(geometrias: np.ndarray, recorte: BaseGeometry, margem_m: flo
 
 # ------------------------------------------------------------------ validação
 
+def regras_de_chave(regras: list[Regra]) -> list[Regra]:
+    """As colunas da chave natural, na ordem da fonte (fonte_coluna.ordem, depois o nome)."""
+    return sorted((r for r in regras if r.chave), key=lambda r: (r.ordem is None, r.ordem or 0, r.coluna))
+
+
+def chaves_naturais(textos: pd.DataFrame, regras: list[Regra]) -> pd.Series:
+    """A chave natural de cada linha: as colunas de chave juntas com "|" (até 400 caracteres), ou
+    None quando falta alguma parte (o obrigatório já reprova a linha)."""
+    chaves = regras_de_chave(regras)
+    n = len(textos)
+    if not chaves:
+        return pd.Series([None] * n, dtype="object")
+
+    def coluna(nome):
+        if nome in textos.columns:
+            return textos[nome].astype("object").where(textos[nome].notna(), None).reset_index(drop=True)
+        return pd.Series([None] * n, dtype="object")
+
+    partes = [_aparado(coluna(r.coluna)) for r in chaves]
+    completa = np.logical_and.reduce([p.notna().to_numpy() for p in partes])
+    juntas = partes[0].fillna("")
+    for p in partes[1:]:
+        juntas = juntas + "|" + p.fillna("")
+    return juntas.str.slice(0, 400).where(completa, None).astype("object")
+
+
 def validar(textos: pd.DataFrame, geometrias: np.ndarray, regras: list[Regra], ctx: Contexto,
-            camadas: pd.Series | None = None, linhas: pd.Series | None = None) -> Validacao:
+            repetidas: set[str] | None = None) -> Validacao:
     """Aplica as regras a todas as linhas de uma vez. `textos` tem uma coluna por coluna da fonte
-    (texto ou None); `geometrias`, a geometria de cada linha (shapely ou None)."""
+    (texto ou None); `geometrias`, a geometria de cada linha (shapely ou None). `repetidas`: as
+    chaves que se repetem no arquivo inteiro, quando ele é validado em blocos; sem ela, conta só
+    as repetidas dentro de `textos`."""
     n = len(textos)
     erros: list[tuple] = []  # (linha, tipo_erro, campo, motivo, valor_recebido)
 
@@ -322,18 +352,15 @@ def validar(textos: pd.DataFrame, geometrias: np.ndarray, regras: list[Regra], c
         acusar(informado & invalido, "TIPO_DE_DADO_INVALIDO", r.coluna, f"Valor não converte para {r.tipo}.", valores)
 
     # Chave natural: as colunas de chave juntas com "|", na ordem da fonte. Nula se faltar parte.
-    chaves = sorted((r for r in por_id if r.chave), key=lambda r: (r.ordem is None, r.ordem or 0, r.coluna))
-    chave_natural = pd.Series([None] * n, dtype="object")
+    chaves = regras_de_chave(por_id)
+    chave_natural = chaves_naturais(textos, por_id)
     if chaves:
-        partes = [_aparado(coluna(r.coluna)) for r in chaves]
-        completa = np.logical_and.reduce([p.notna().to_numpy() for p in partes])
-        juntas = partes[0].fillna("")
-        for p in partes[1:]:
-            juntas = juntas + "|" + p.fillna("")
-        chave_natural = juntas.str.slice(0, 400).where(completa, None)
-        contagem = chave_natural.map(chave_natural.value_counts())
+        if repetidas is None:
+            repetida = chave_natural.map(chave_natural.value_counts()) > 1
+        else:
+            repetida = chave_natural.isin(repetidas)
         nomes = ", ".join(r.coluna for r in chaves)[:128]
-        acusar(chave_natural.notna() & (contagem > 1), "CHAVE_NATURAL_DUPLICADA", nomes,
+        acusar(chave_natural.notna() & repetida, "CHAVE_NATURAL_DUPLICADA", nomes,
                "Chave repetida em mais de uma linha do arquivo.", chave_natural)
 
     # Regressão: campo preenchido na carga anterior que chegou vazio (só com chave de uma coluna).
@@ -438,7 +465,8 @@ def converter(valor: str | None, regra: Regra):
     if regra.tipo == "INTEIRO":
         return int(texto)
     if regra.tipo == "DECIMAL":
-        return float(texto.replace(",", ".") if (regra.formato or "").upper() == "VIRGULA" else texto)
+        # Decimal, não float: o TO_NUMBER gravava o número exato (o IAT manda 487.38854000000003).
+        return Decimal(texto.replace(",", ".") if (regra.formato or "").upper() == "VIRGULA" else texto)
     if regra.tipo == "DATA":
         if (regra.formato or "").upper() == "EPOCH_MS":
             return _epoch_ms(texto)
@@ -514,12 +542,18 @@ def carregar_contexto(con, regras: list[Regra]) -> Contexto:
 
 def contorno_pr(cur) -> BaseGeometry | None:
     """O contorno do PR: a união dos municípios do PR que estão na Tratada (None se não houver).
-    Simplificado em ~20 m, como a grade do banco fazia: a margem da divisa é de 1 km."""
+    Simplificado (~10 m cada município, ~20 m o contorno), como a grade do banco fazia: a margem
+    da divisa é de 1 km, e a união dos municípios detalhados levaria segundos a cada carga."""
+    # O WKB vem direto em bytes (LONG_RAW), e não como LOB lido um por um: 399 idas ao banco a menos.
+    cur.outputtypehandler = lambda c, m: (c.var(oracledb.DB_TYPE_LONG_RAW, arraysize=c.arraysize)
+                                          if m.type_code is oracledb.DB_TYPE_BLOB else None)
     cur.execute("SELECT SDO_UTIL.TO_WKBGEOMETRY(geometria) FROM municipio WHERE estado = 'PR'")
-    municipios = [shapely.from_wkb(w.read() if hasattr(w, "read") else w) for (w,) in cur]
+    municipios = [shapely.from_wkb(w) for (w,) in cur]
+    cur.outputtypehandler = None
     if not municipios:
         return None
-    return shapely.simplify(shapely.union_all(shapely.make_valid(np.array(municipios, dtype=object))), 2e-4)
+    simplificados = shapely.simplify(shapely.make_valid(np.array(municipios, dtype=object)), 1e-4)
+    return shapely.simplify(shapely.union_all(simplificados), 2e-4)
 
 
 def _nome_sql(nome: str) -> str:

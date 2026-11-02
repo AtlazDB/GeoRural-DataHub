@@ -200,7 +200,13 @@ def atributos_json(atributos: dict) -> str:
 
 
 def wkb(geometria: BaseGeometry | None) -> bytes | None:
-    """WKB 2D, normalizado para o Oracle sem mudar a forma:
+    """WKB 2D da geometria normalizada (ver normalizar)."""
+    normalizada = normalizar(geometria)
+    return None if normalizada is None else shapely.to_wkb(normalizada, output_dimension=2)
+
+
+def normalizar(geometria: BaseGeometry | None) -> BaseGeometry | None:
+    """A geometria normalizada para o Oracle sem mudar a forma (None se vazia):
 
     * tira os vértices seguidos a menos de VERTICE_REPETIDO um do outro. Abaixo da tolerância
       do banco (5 cm) o Oracle reprova com ORA-13356 ("vértice duplicado"): na Reserva Legal do
@@ -224,9 +230,91 @@ def wkb(geometria: BaseGeometry | None) -> bytes | None:
             geometria = limpa
     if geometria.geom_type in ("Polygon", "MultiPolygon"):
         geometria = shapely.orient_polygons(geometria, exterior_cw=False)
-    return shapely.to_wkb(geometria, output_dimension=2)
+    return shapely.force_2d(geometria)
 
 
 # ~6 cm em graus (no PR, 1° de longitude dá ~100 km): um pouco acima da tolerância de 5 cm do
 # banco, para o que o Oracle chamaria de vértice duplicado sair antes.
 VERTICE_REPETIDO = 6e-7
+
+
+# ------------------------------------------------------------------ em tabela (US11.T04)
+
+@dataclass
+class Tabela:
+    """Um bloco do arquivo, em colunas: o que o processamento sem staging valida e grava de uma vez."""
+    linhas: list[int]            # numeração contínua no arquivo inteiro, a partir de 1
+    camadas: list[str]           # de onde veio cada linha: o .shp ou a página do zip
+    atributos: dict[str, list]   # coluna -> valores como tipos do Python (None no lugar de nulo)
+    geometrias: list             # shapely ou None
+
+    def __len__(self) -> int:
+        return len(self.linhas)
+
+    def textos(self, colunas) -> "pd.DataFrame":
+        """O texto de cada coluna pedida, do jeito que as regras leem (ver texto)."""
+        import pandas as pd
+        vazio = [None] * len(self)
+        return pd.DataFrame({c: [texto(v) for v in self.atributos.get(c, vazio)] for c in colunas},
+                            columns=list(colunas), dtype="object")
+
+    def registro(self, posicao: int) -> dict:
+        return {nome: valores[posicao] for nome, valores in self.atributos.items()}
+
+
+def tabelas(caminho: Path, pasta: Path, tamanho: int) -> Iterator[Tabela]:
+    """O arquivo em blocos de até `tamanho` linhas, na mesma ordem e com os mesmos valores que
+    registros() entrega: o shapefile pelo pyogrio (GeoPandas), o GeoJSON pelo json."""
+    linha = 0
+    for camada, atributos, geometrias in _blocos(caminho, pasta):
+        for inicio in range(0, len(geometrias), tamanho):
+            fim = min(inicio + tamanho, len(geometrias))
+            yield Tabela(list(range(linha + inicio + 1, linha + fim + 1)), [camada] * (fim - inicio),
+                         {k: v[inicio:fim] for k, v in atributos.items()}, geometrias[inicio:fim])
+        linha += len(geometrias)
+
+
+def _blocos(caminho: Path, pasta: Path):
+    sufixo = caminho.suffix.lower()
+    if sufixo in EXTENSOES_GEOJSON:
+        yield _geojson_em_colunas(caminho, caminho.name)
+        return
+    if sufixo != ".zip":
+        raise ArquivoInvalido(f"Formato não suportado no processamento: {caminho.name} "
+                              "(aceitos: .zip com shapefile ou GeoJSON, .geojson, .json)")
+    try:
+        with zipfile.ZipFile(caminho) as arquivo_zip:
+            tem_shp = any(nome.lower().endswith(".shp") for nome in arquivo_zip.namelist())
+    except zipfile.BadZipFile as e:
+        raise ArquivoInvalido(f"Não foi possível descompactar o arquivo: {e}") from e
+
+    if tem_shp:
+        for shp in shapefile.extrair(caminho, pasta):
+            for _, gdf in shapefile.ler_em_lotes(shp, 5000):
+                coluna_geo = gdf.geometry.name
+                atributos = {c: [_valor_python(v) for v in gdf[c].tolist()] for c in gdf.columns if c != coluna_geo}
+                yield shp.name, atributos, list(gdf.geometry.array)
+        return
+
+    paginas = sorted(p for p in _extrair(caminho, pasta)
+                     if p.suffix.lower() in EXTENSOES_GEOJSON and p.name.lower() != MANIFESTO_COLETA)
+    if not paginas:
+        raise ArquivoInvalido("O zip não tem shapefile (.shp) nem GeoJSON.")
+    for pagina in paginas:
+        yield _geojson_em_colunas(pagina, pagina.name)
+        pagina.unlink()  # libera o disco: a página já foi lida
+
+
+def _geojson_em_colunas(caminho: Path, camada: str):
+    """Uma FeatureCollection inteira em colunas, lida pelo json como em _ler_geojson (não pelo GDAL:
+    numa coluna com 0 e 25.5, o GDAL entregaria o 0 como 0.0, e um campo INTEIRO reprovaria)."""
+    atributos: dict[str, list] = {}
+    geometrias: list = []
+    for posicao, (_, valores, geometria) in enumerate(_ler_geojson(caminho, camada)):
+        for nome in valores:
+            if nome not in atributos:  # na ordem em que a coluna apareceu, como em registros()
+                atributos[nome] = [None] * posicao
+        for nome, coluna in atributos.items():
+            coluna.append(valores.get(nome))
+        geometrias.append(geometria)
+    return camada, atributos, geometrias

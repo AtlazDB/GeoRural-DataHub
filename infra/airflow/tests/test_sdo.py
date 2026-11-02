@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from shapely.geometry import MultiPolygon, Point, Polygon
+from shapely.geometry import GeometryCollection, MultiPolygon, Point, Polygon
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dags"))
 
@@ -38,6 +38,6 @@ def test_multipoligono():
     assert elem == [1, 1003, 1, 11, 1003, 1, 21, 2003, 1]
 
 
-def test_recusa_o_que_nao_e_poligono():
+def test_recusa_o_que_nao_tem_conversao():
     with pytest.raises(ValueError):
-        sdo.elementos(Point(0, 0))
+        sdo.elementos(GeometryCollection([Point(-51.0, -25.0)]))
