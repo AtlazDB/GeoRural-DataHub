@@ -43,7 +43,7 @@ def preparar(cfg: Config, arquivo_id: int, ja_reservado: bool, dag_run_id: str |
     """Confere o arquivo, garante a reserva (PROCESSANDO) e abre a execução. Devolve o id dela.
     Vale para os dois caminhos (este e o generico.py).
 
-    ja_reservado=True quando quem disparou foi o varredor, que já passou o arquivo para
+    ja_reservado=True quando quem disparou (back-end ou coletar_fonte) já passou o arquivo para
     PROCESSANDO. Num disparo manual a reserva acontece aqui.
     """
     with conectar(cfg) as con:

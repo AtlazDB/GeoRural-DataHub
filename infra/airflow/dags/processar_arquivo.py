@@ -9,7 +9,8 @@ Processa um arquivo da zona bruta, por um de dois caminhos:
   Sem mapeamento, o arquivo fica AGUARDANDO_MAPEAMENTO, com as colunas registradas.
 
 **Como é disparada**
-* pelo `varredor_bruta`, que já reserva o arquivo (status PROCESSANDO): `{"arquivo_bruto_id": 42, "reservado": true}`
+* pelo back-end (upload e "Processar", pela API REST) ou pelo `coletar_fonte`, que já reservam o arquivo
+  (status PROCESSANDO): `{"arquivo_bruto_id": 42, "reservado": true}`
 * à mão, pela interface do Airflow (*Trigger DAG w/ config*): `{"arquivo_bruto_id": 42}` — serve para reprocessar
 
 Uma execução por vez (`max_active_runs=1`): dois arquivos gravando ao mesmo tempo disputariam
@@ -44,7 +45,7 @@ def _registrar_falha(context) -> None:
     doc_md=__doc__,
     params={
         "arquivo_bruto_id": Param(None, type=["null", "integer"], description="id em arquivo_bruto"),
-        "reservado": Param(False, type="boolean", description="true quando o varredor já reservou"),
+        "reservado": Param(False, type="boolean", description="true quando quem disparou já reservou"),
     },
 )
 def processar_arquivo():
@@ -63,7 +64,7 @@ def processar_arquivo():
         try:
             return car.preparar(cfg, arquivo_id, reservado, contexto["dag_run"].run_id)
         except Exception as erro:
-            # Se o varredor reservou e a preparação falhou, devolve o arquivo como REJEITADO
+            # Se o arquivo já veio reservado e a preparação falhou, devolve como REJEITADO
             # para ele não ficar preso em PROCESSANDO. Num disparo manual não mexe em nada
             # (o erro pode ser justamente "já está sendo processado").
             if reservado:

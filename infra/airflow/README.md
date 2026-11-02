@@ -12,7 +12,7 @@ com Airflow 3.3.1 em `docker compose`, dentro de `~/airflow`.
 | `docker-compose.yaml` | Airflow de **producao** na VM: Postgres + api-server, scheduler e dag-processor (LocalExecutor). Tudo lido do `.env` |
 | `docker-compose.local.yaml` | Airflow de **desenvolvimento** no seu PC (um container, `airflow standalone`) |
 | `.env.local.example` | Modelo do `.env.local` do desenvolvimento |
-| `dags/` | As DAGs (`teste_conexoes`, `coleta_fontes`, `coletar_fonte`, `varredor_bruta`, `processar_arquivo`) |
+| `dags/` | As DAGs (`teste_conexoes`, `coletar_fonte`, `processar_arquivo`, `revalidar_registro`) |
 | `dags/georural/` | Codigo do pipeline usado pelas DAGs (testavel sem Airflow) |
 | `tests/` | Testes do pipeline (pytest) |
 
@@ -30,9 +30,10 @@ back-end e o **bucket real** da OCI (com a sua chave da API, a mesma do back-end
    ```
 5. Abra http://localhost:8088 (sem login em dev; a 8080 fica para o back-end) e rode a DAG `teste_conexoes`:
    as duas tarefas verdes = Oracle e bucket funcionando
-6. Ative as DAGs `varredor_bruta`, `processar_arquivo`, `coleta_fontes` e `coletar_fonte`. O back-end
-   não processa nada: todo upload, todo clique em "Processar" e todo "Executar" de fonte por link
-   fica com o Airflow.
+6. Ative as DAGs `processar_arquivo`, `coletar_fonte` e `revalidar_registro`. O back-end não processa
+   nada: todo upload, todo clique em "Processar" e todo "Executar" de fonte por link dispara uma DAG
+   pela API REST. Nenhuma DAG roda por agendamento: sem clique, não há execução (cada execução tem
+   custo). Com o Airflow fora do ar ou a DAG pausada, o botão responde 503 com o motivo; é só tentar de novo.
 7. Para a demonstração com as fontes por link (municípios, focos, Reserva Legal e CAR pelo WFS),
    rode uma vez o `db/seed-demo/fontes.sql` do back-end: ele cadastra as 4 fontes com o mapeamento.
 
@@ -45,17 +46,20 @@ docker compose -f docker-compose.local.yaml --env-file .env.local run --rm \
 ### Como a coleta por link funciona
 
 ```
-"Executar" na tela ──> fonte.coleta_solicitada_em ──> coleta_fontes (a cada 2 min)
-                                                         │ reserva o pedido
+"Executar" na tela ──> fonte.coleta_solicitada_em + API REST do Airflow
+                                                         │
                                                          ▼
-                                                   coletar_fonte (uma por vez)
+                                                   coletar_fonte (uma por vez): reserva o pedido
                                                      pergunta o total, pagina o servico
                                                      (ArcGIS ou WFS) em ordem fixa, varias
                                                      paginas ao mesmo tempo, confere
                                                      coletado = total, zip de paginas GeoJSON
                                                          │ mesmo hash da ultima? "sem mudanca"
                                                          ▼
-                                     bucket bruta/<SIGLA>/... + arquivo_bruto RECEBIDO (COLETA)
+                                     bucket bruta/<SIGLA>/... + arquivo_bruto (COLETA)
+                                                         │ reserva e dispara
+                                                         ▼
+                                                   processar_arquivo
 ```
 
 * `georural/coleta.py`. Pagina ArcGIS por `resultOffset`/`resultRecordCount` ordenado pelo
@@ -79,8 +83,8 @@ docker compose -f docker-compose.local.yaml --env-file .env.local run --rm \
 ### Como o processamento funciona
 
 ```
-upload/coleta ──> arquivo_bruto (RECEBIDO) ──> varredor_bruta (a cada 2 min)
-                                                  │ reserva: RECEBIDO → PROCESSANDO
+upload, "Processar" (API REST) ou coletar_fonte
+                                                  │ reserva: arquivo_bruto → PROCESSANDO
                                                   ▼
                                             processar_arquivo
                                               preparar:  abre a execucao
@@ -159,8 +163,9 @@ ssh -L 8088:localhost:8088 ubuntu@<IP da VM>      # do seu computador
 cat ~/Atlaz4/infra/airflow/config/simple_auth_manager_passwords.json.generated   # senha do admin
 ```
 Abra http://localhost:8088, rode a DAG `teste_conexoes` (as duas tarefas verdes = Autonomous e
-bucket funcionando) e ative `varredor_bruta`, `processar_arquivo`, `coleta_fontes` e `coletar_fonte`.
-O back-end so marca os arquivos e os pedidos de coleta no banco, e o Airflow os pega. As duas VMs nao precisam se enxergar.
+bucket funcionando) e ative `processar_arquivo`, `coletar_fonte` e `revalidar_registro`.
+O back-end dispara as DAGs pela API REST: a VM do back-end precisa alcancar a do Airflow (rede privada,
+nunca a porta aberta na internet), com `AIRFLOW_URL`, `AIRFLOW_USUARIO` e `AIRFLOW_SENHA` no `.env` dela.
 
 ## Como aplicar uma mudanca
 
