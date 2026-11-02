@@ -65,9 +65,10 @@ PAGINA_ARCGIS = 2000
 MAX_PAGINAS = 1000
 TENTATIVAS = 3
 PAUSA_ENTRE_PAGINAS = 0.5  # segundos, a cada pedido: o IAT e o SICAR são serviços públicos
-# Páginas pedidas ao mesmo tempo. O WFS do SICAR fica com menos: uma página do CAR passa de 100 MB
-# na memória. GEORURAL_COLETA_PARALELO troca os dois (1 = uma página por vez, como antes).
-PARALELO = {"ARCGIS": 4, "WFS": 2}
+# Páginas pedidas ao mesmo tempo. Medido no WFS do SICAR (páginas de 5.000 imóveis, ~10 MB): 21 s
+# por página com 1 pedido, 13 s com 2 e 10 s com 4; o CAR do PR cai de ~40 para ~19 min.
+# GEORURAL_COLETA_PARALELO troca (1 = uma página por vez, como antes).
+PARALELO = 4
 TEMPO_LIMITE = (15, 120)  # conexão, leitura (segundos): página que demora mais que isso é dividida
 LIMITE_ARQUIVO = 2 * 1024**3  # o mesmo app.coleta.limite-bytes do back-end
 MAX_REDIRECIONAMENTOS = 5
@@ -339,12 +340,12 @@ def coletar(url: str, pasta: Path, sigla: str, *, chaves: list[str] | None = Non
     if tipo_link == TIPO_ARQUIVO:
         return _baixar_arquivo(url, pasta, sigla, cliente, metodo, corpo)
     servico = _ArcGIS(url, cliente) if tipo_link == TIPO_ARCGIS else _WFS(url, cliente, chaves or [])
-    return _paginar(servico, url, pasta, sigla, pausa, progresso, paralelo or _paralelo(servico.tipo))
+    return _paginar(servico, url, pasta, sigla, pausa, progresso, paralelo or _paralelo())
 
 
-def _paralelo(tipo_servico: str) -> int:
+def _paralelo() -> int:
     valor = os.environ.get("GEORURAL_COLETA_PARALELO", "").strip()
-    return max(1, int(valor)) if valor else PARALELO[tipo_servico]
+    return max(1, int(valor)) if valor else PARALELO
 
 
 def _paginar(servico: _Servico, url: str, pasta: Path, sigla: str, pausa: float,

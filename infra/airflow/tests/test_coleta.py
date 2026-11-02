@@ -227,10 +227,10 @@ def test_servidor_que_entrega_menos_no_meio_tem_o_resto_pedido_de_novo(tmp_path)
 
 
 def test_paralelo_pela_variavel_de_ambiente(monkeypatch):
-    assert coleta._paralelo(coleta.TIPO_ARCGIS) == coleta.PARALELO["ARCGIS"]
-    assert coleta._paralelo(coleta.TIPO_WFS) == coleta.PARALELO["WFS"]
+    monkeypatch.delenv("GEORURAL_COLETA_PARALELO", raising=False)
+    assert coleta._paralelo() == coleta.PARALELO
     monkeypatch.setenv("GEORURAL_COLETA_PARALELO", "1")
-    assert coleta._paralelo(coleta.TIPO_ARCGIS) == 1
+    assert coleta._paralelo() == 1
 
 
 def test_mensagem_traz_a_duracao(tmp_path):

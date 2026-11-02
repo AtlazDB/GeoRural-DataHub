@@ -61,10 +61,11 @@ docker compose -f docker-compose.local.yaml --env-file .env.local run --rm \
 * `georural/coleta.py`. Pagina ArcGIS por `resultOffset`/`resultRecordCount` ordenado pelo
   objectid, e WFS por `startIndex`/`count` ordenado pela coluna-chave do mapeamento.
 * Paginas em paralelo: a 1a vai sozinha (diz quantos registros o servidor entrega por pedido); as
-  demais viram faixas fixas, ate 4 ao mesmo tempo no ArcGIS e 2 no WFS (`GEORURAL_COLETA_PARALELO`
-  troca; 1 = uma por vez). O zip e gravado na ordem das faixas: sai igual com 1 ou com N pedidos, e o
-  hash do "sem mudanca" continua valendo. No recorte de 20 mil poligonos da Reserva Legal do IAT,
-  30 s com 1 pedido e 16 s com 4.
+  demais viram faixas fixas, ate 4 ao mesmo tempo (`GEORURAL_COLETA_PARALELO` troca; 1 = uma por
+  vez). O zip e gravado na ordem das faixas: sai igual com 1 ou com N pedidos, e o hash do "sem
+  mudanca" continua valendo. Medido: no WFS do SICAR cada pagina de 5.000 imoveis leva ~21 s com 1
+  pedido, 13 s com 2 e 10 s com 4 (o CAR do PR cai de ~40 para ~19 min); no recorte de 20 mil
+  poligonos da Reserva Legal do IAT, 30 s com 1 pedido e 16 s com 4.
 * Faltou registro ou veio repetido entre paginas: a coleta **falha** ("vieram X de Y") em vez de
   gravar dado pela metade. HTTP 500 ou demora na pagina: ela e dividida pela metade (ate 50). Pagina
   vazia no meio da fonte (o ArcGIS do IAT faz isso sob carga, com HTTP 200) e pedida de novo.
