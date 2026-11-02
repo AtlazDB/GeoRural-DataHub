@@ -13,6 +13,7 @@ import oracledb
 import shapely
 
 from georural import sdo
+from georural.tratada import FaltaMigration, hash_registro, wkb
 from georural.validacao import Resultado
 
 CONJUNTO_IMOVEIS = "imoveis_rurais"
@@ -55,10 +56,10 @@ SQL_MERGE_IMOVEL = """
 SQL_QUARENTENA = """
     INSERT INTO registro_quarentena (execucao_id, numero_linha, campo, motivo, payload,
            entidade, chave_natural, tipo_erro, valor_recebido, dataset_versao_id, geometria,
-           status_analise, justificativa, analisado_por, analisado_em)
+           hash_registro, status_analise, justificativa, analisado_por, analisado_em)
     VALUES (:execucao_id, :numero_linha, :campo, :motivo, :payload,
             :entidade, :chave_natural, :tipo_erro, :valor_recebido, :dataset_versao_id, :geometria,
-            :status_analise, :justificativa, :analisado_por,
+            :hash_registro, :status_analise, :justificativa, :analisado_por,
             CASE WHEN :descartado = 1 THEN SYSTIMESTAMP END)
 """
 
@@ -219,8 +220,13 @@ def gravar_imoveis(cur, dataset_versao_id: int, aprovados: list[Resultado]) -> N
     )
 
 
-def gravar_quarentena(cur, execucao_id: int, dataset_versao_id: int, reprovados: list[Resultado]) -> None:
-    if not reprovados:
+def gravar_quarentena(cur, execucao_id: int, dataset_versao_id: int, reprovados: list[Resultado],
+                      fila: "FilaQuarentena") -> None:
+    novos = fila.so_os_novos(cur, execucao_id, dataset_versao_id, [
+        (hash_quarentena(r.payload_json(), r.campo, r.tipo_erro, r.motivo, r.geometria_recebida), r.linha, r)
+        for r in reprovados
+    ])
+    if not novos:
         return
     tipos = sdo.TiposSdo(cur.connection)
     cur.setinputsizes(payload=oracledb.DB_TYPE_CLOB, geometria=tipos.geometria)
@@ -239,12 +245,13 @@ def gravar_quarentena(cur, execucao_id: int, dataset_versao_id: int, reprovados:
                 "valor_recebido": r.valor_recebido,
                 "dataset_versao_id": dataset_versao_id,
                 "geometria": geometria_quarentena(tipos, r.geometria_recebida),
+                "hash_registro": hash_,
                 "status_analise": "DESCARTADO" if r.descartado_automaticamente else "PENDENTE",
                 "justificativa": r.justificativa if r.descartado_automaticamente else None,
                 "analisado_por": AUTOR_DESCARTE_AUTOMATICO if r.descartado_automaticamente else None,
                 "descartado": 1 if r.descartado_automaticamente else 0,
             }
-            for r in reprovados
+            for hash_, r in novos
         ],
     )
 
@@ -256,6 +263,70 @@ def geometria_quarentena(tipos: sdo.TiposSdo, geometria):
     if geometria is None or geometria.is_empty or geometria.geom_type not in ("Polygon", "MultiPolygon"):
         return None
     return tipos.converter(shapely.orient_polygons(geometria, exterior_cw=False), sdo.SRID_BANCO)
+
+
+# ------------------------------------------------------------------ fila da quarentena
+
+def hash_quarentena(payload: str | None, campo: str | None, tipo_erro: str | None, motivo: str | None, geometria) -> str:
+    """O que identifica um registro reprovado: o que veio no arquivo e por que foi reprovado. O
+    motivo entra porque, se a regra mudar, o analista precisa ver o registro de novo."""
+    atributos = json.dumps(json.loads(payload), ensure_ascii=False, sort_keys=True) if payload else None
+    return hash_registro({"payload": atributos, "campo": campo, "tipo_erro": tipo_erro, "motivo": motivo},
+                         wkb(geometria))
+
+
+@dataclass
+class FilaQuarentena:
+    """O que as cargas anteriores deixaram na quarentena, por hash. Um reprovado igual não é gravado
+    de novo: se ainda está em aberto, o registro passa para esta carga (e não é substituído); se o
+    analista já decidiu, a decisão continua valendo.
+
+    `por_hash`: para cada hash, o id de cada registro em aberto, ou None se a análise já acabou."""
+    por_hash: dict[str, list[int | None]] = field(default_factory=dict)
+    iguais: int = 0
+
+    def so_os_novos(self, cur, execucao_id: int, versao_id: int, candidatos: list[tuple]) -> list[tuple]:
+        """`candidatos`: (hash, número da linha, registro). Devolve (hash, registro) do que falta gravar."""
+        novos, abertos = [], []
+        for hash_, numero_linha, registro in candidatos:
+            anteriores = self.por_hash.get(hash_)
+            if not anteriores:  # lista vazia: linhas idênticas no arquivo, cada uma é um registro
+                novos.append((hash_, registro))
+                continue
+            self.iguais += 1
+            id_aberto = anteriores.pop()
+            if id_aberto is not None:
+                abertos.append({"id": id_aberto, "execucao": execucao_id, "versao": versao_id, "linha": numero_linha})
+        if abertos:
+            cur.executemany("""UPDATE registro_quarentena
+                                  SET execucao_id = :execucao, dataset_versao_id = :versao, numero_linha = :linha
+                                WHERE id = :id""", abertos)
+        return novos
+
+
+def carregar_fila(cur, conjunto: str, com_chave: bool) -> FilaQuarentena:
+    """Os registros do conjunto com hash, menos os que uma carga já substituiu.
+
+    Revalidado só conta com chave: na carga-retrato, o registro revalidado não vem no arquivo e é
+    apagado da Tratada, então o reprovado precisa voltar para a fila, ou o dado sumiria sem aviso."""
+    try:
+        cur.execute("""SELECT q.id, q.hash_registro, q.status_analise, q.analisado_por FROM registro_quarentena q
+                        WHERE q.hash_registro IS NOT NULL AND q.status_analise <> 'SUBSTITUIDO'
+                          AND q.execucao_id IN (SELECT dv.execucao_id FROM dataset_versao dv
+                                                 WHERE dv.conjunto = :conjunto)""", conjunto=conjunto)
+        linhas = cur.fetchall()
+    except oracledb.DatabaseError as e:
+        if "ORA-00904" in str(e):
+            raise FaltaMigration("A tabela registro_quarentena não tem a coluna hash_registro: aplique as "
+                                 "migrations do back-end (V23).") from e
+        raise
+    fila = FilaQuarentena()
+    for id_, hash_, status, autor in linhas:
+        if status == "REVALIDADO" and not com_chave:
+            continue
+        encerrado = status == "REVALIDADO" or (status == "DESCARTADO" and autor != AUTOR_DESCARTE_AUTOMATICO)
+        fila.por_hash.setdefault(hash_, []).append(None if encerrado else id_)
+    return fila
 
 
 # Quem aparece como autor quando a carga encerra um registro antigo da quarentena.
