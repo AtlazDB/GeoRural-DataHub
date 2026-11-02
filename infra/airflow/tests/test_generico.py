@@ -62,7 +62,7 @@ def test_formato_nao_suportado(tmp_path):
         list(leitura.registros(arquivo, tmp_path / "x"))
 
 
-def test_texto_no_formato_das_regras_do_pkg_quality():
+def test_texto_no_formato_das_regras():
     assert leitura.texto(1e-05) == "0.00001"
     assert leitura.texto(134.82004) == "134.82004"
     assert leitura.texto(4106407) == "4106407"

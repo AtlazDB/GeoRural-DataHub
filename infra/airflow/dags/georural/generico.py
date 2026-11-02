@@ -1,56 +1,70 @@
 """Processamento genérico: qualquer fonte, guiado pelo mapeamento (regra_campo), sem código por fonte.
 
 É o caminho de tudo o que não é o shapefile do CAR: as fontes por link (municípios, focos de calor,
-Reserva Legal e o próprio CAR pelo WFS) e os uploads de GeoJSON.
+Reserva Legal e o próprio CAR pelo WFS) e os uploads de GeoJSON. Sem staging (US11.T04): as regras
+rodam aqui (regras.py) e os aprovados vão direto para a Zona Tratada (tratada.py).
 
     1. baixa o arquivo da zona bruta
-    2. primeira passada: as colunas que vieram (detectar_colunas) e, para o desempate, as colunas
-       de código, situação, área e datas. Sem mapeamento, o arquivo fica AGUARDANDO_MAPEAMENTO
+    2. primeira passada, em blocos: as colunas que vieram (detectar_colunas), as colunas do
+       desempate e a chave natural de cada linha. Sem mapeamento, o arquivo fica
+       AGUARDANDO_MAPEAMENTO
     3. desempate de código repetido (a regra do CAR: AT vence, depois o mais recente, a cancelada
        perde no empate, cópia idêntica sai). Só quando o mapeamento tem `situacao`. Os perdedores
-       vão direto para a quarentena como DESCARTADO, com a justificativa; conflito de verdade segue
-       para a staging, e o pkg_quality reprova as duas versões para uma pessoa decidir
-    4. segunda passada: staging (atributos em JSON, geometria em WKB)
-    5. pkg_quality.validate: as regras da fonte
-    6. pkg_tratada.gravar_aprovados e gravar_reprovados: Tratada e quarentena
-    7. conclui (substituir_pendentes) e apaga a staging
-    8. recalcula os indicadores que dependem do conjunto (IRL, IFC)
+       vão direto para a quarentena como DESCARTADO, com a justificativa; conflito de verdade é
+       reprovado pela regra de chave repetida para uma pessoa decidir
+    4. segunda passada, bloco a bloco: valida (regras.validar), grava os aprovados na Tratada só
+       se mudaram (hash), os reprovados na quarentena e as correções de geometria. Commit a cada
+       bloco: o undo do Autonomous tem 1 GB
+    5. no fim, na carga-retrato, apaga o que não veio mais; conclui (substituir_pendentes)
+    6. recalcula os indicadores que dependem do conjunto (IRL, IFC)
 
-Versão + staging + Tratada + quarentena + conclusão ficam numa transação só, como no car.py.
+Se falhar no meio, os blocos já gravados ficam (estão certos), e a próxima carga só refaz o que
+falta: o que já entrou tem o mesmo hash e é pulado.
 """
 
 import logging
 import tempfile
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import oracledb
-import pandas as pd
+import pandas as pd  # noqa: F401  (o desempate recebe um DataFrame)
 
-from georural import bucket, colunas, gravacao, leitura
+from georural import bucket, colunas, gravacao, leitura, regras, sdo
 from georural.banco import conectar
 from georural.config import Config
+from georural.tratada import Contagem, Tratada
 from georural.validacao import ColunasDesempate, Desempate, planejar_desempate
 
 log = logging.getLogger(__name__)
 
-SQL_STAGING = """
-    INSERT INTO staging_registro (execucao_id, camada, numero_linha, atributos, geometria_wkb)
-    VALUES (:execucao_id, :camada, :numero_linha, :atributos, :geometria_wkb)
-"""
-
-# Perdedor do desempate: não passa pela staging, vai direto para a quarentena já descartado.
+# Perdedor do desempate: vai direto para a quarentena, já descartado.
 SQL_DESCARTE = """
     INSERT INTO registro_quarentena (execucao_id, numero_linha, campo, motivo, payload, entidade,
            chave_natural, tipo_erro, valor_recebido, dataset_versao_id, geometria,
            status_analise, justificativa, analisado_por, analisado_em)
     VALUES (:execucao_id, :numero_linha, :campo, :motivo, :payload, :entidade,
             :chave_natural, 'CHAVE_NATURAL_DUPLICADA', :chave_natural, :dataset_versao_id,
-            pkg_quality.to_geometry(:geometria_wkb),
-            'DESCARTADO', :justificativa, :autor, SYSTIMESTAMP)
+            :geometria, 'DESCARTADO', :justificativa, :autor, SYSTIMESTAMP)
+"""
+
+# Reprovado nas regras: um registro por linha, com o 1º erro e todos os motivos.
+SQL_REPROVADO = """
+    INSERT INTO registro_quarentena (execucao_id, numero_linha, campo, motivo, payload, entidade,
+           chave_natural, tipo_erro, valor_recebido, dataset_versao_id, geometria)
+    VALUES (:execucao_id, :numero_linha, :campo, :motivo, :payload, :entidade,
+            :chave_natural, :tipo_erro, :valor_recebido, :dataset_versao_id, :geometria)
+"""
+
+SQL_CORRECAO = """
+    INSERT INTO correcao_automatica (execucao_id, camada, numero_linha, chave_natural, coluna,
+           erro_original, geometria_original, geometria_corrigida)
+    VALUES (:execucao_id, :camada, :numero_linha, :chave_natural, :coluna, :erro_original,
+            :original, :corrigida)
 """
 
 # Indicadores recalculados quando o conjunto muda (pkg_indicadores).
@@ -75,6 +89,12 @@ class Resumo:
     substituidos: int = 0
     colunas_novas: int = 0
     indicadores: str | None = None
+    # O que a carga fez na Tratada: só o que mudou é gravado.
+    inseridos: int = 0
+    alterados: int = 0
+    iguais: int = 0
+    removidos: int = 0
+    correcoes: int = 0
     # Segundos de cada etapa, na ordem em que rodaram: a base para comparar mudanças no processamento.
     tempos: dict[str, float] = field(default_factory=dict)
 
@@ -88,19 +108,25 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
         local = bucket.baixar(cfg, arquivo.chave_objeto, pasta / arquivo.nome_original)
         log.info("Baixado %s (%.1f MB)", arquivo.chave_objeto, local.stat().st_size / 1e6)
 
-        # O mapeamento vem antes da 1ª passada: é ele que diz quais colunas o desempate usa.
+        # O mapeamento vem antes da 1ª passada: ele diz as colunas do desempate e da chave.
         mapa = colunas.mapeamento(con, fonte_id)
+        lista = regras.carregar_regras(con, fonte_id)
+        mapeadas = sorted({r.coluna for r in lista if r.tipo != "GEOMETRIA"})
         cols = _colunas_desempate(mapa)
         valores_desempate: dict[str, list] = {c: [] for c in cols.todas()} if cols else {}
 
-        # 1ª passada: as colunas que vieram e os valores do desempate (sem geometria, cabe na memória).
+        # 1ª passada: as colunas que vieram, os valores do desempate e a chave natural de cada linha
+        # (sem geometria: cabe na memória).
         levantamento = colunas.Levantamento()
+        chaves: list = []
         with _etapa(resumo, "leitura"):
-            for registro in leitura.registros(local, pasta / "p1"):
-                levantamento.acrescentar(registro.atributos, registro.geometria)
-                for nome, lista in valores_desempate.items():
-                    lista.append(registro.atributos.get(nome))
-                resumo.lidos += 1
+            for bloco in leitura.tabelas(local, pasta / "p1", cfg.tamanho_lote):
+                levantamento.acrescentar_tabela(bloco)
+                for nome, valores in valores_desempate.items():
+                    valores.extend(bloco.atributos.get(nome, [None] * len(bloco)))
+                if regras.regras_de_chave(lista):
+                    chaves.extend(regras.chaves_naturais(bloco.textos(mapeadas), lista))
+                resumo.lidos += len(bloco)
         resumo.colunas_novas = colunas.detectar_colunas(con, fonte_id, levantamento)
         con.commit()  # as colunas ficam registradas mesmo se o resto falhar: a tela de mapeamento usa
         log.info("%d registros, %d colunas (%d novas)", resumo.lidos, len(levantamento.nomes), resumo.colunas_novas)
@@ -112,48 +138,84 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
             resumo.status = "AGUARDANDO_MAPEAMENTO"
             return resumo
 
-        plano = _planejar(cols, valores_desempate) if cols else {}
+        descartes = _descartes(_planejar(cols, valores_desempate), cols, valores_desempate) if cols else {}
         del valores_desempate
+        # Chave repetida no arquivo inteiro (fora os perdedores do desempate): cada bloco reprova a sua parte.
+        contagem_chaves = Counter(c for i, c in enumerate(chaves) if c is not None and i not in descartes)
+        repetidas = {c for c, n in contagem_chaves.items() if n > 1}
+        del chaves, contagem_chaves
+
         resumo.conjunto = gravacao.conjunto_da_carga(mapa.tabela, arquivo.sigla_fonte)
         entidade = mapa.tabela if len(mapa.tabelas) == 1 else None
+        geometria = next((r for r in lista if r.tipo == "GEOMETRIA"), None)
 
         try:
+            gravou = False
+            with _etapa(resumo, "contexto"):
+                ctx = regras.carregar_contexto(con, lista)
             with con.cursor() as cur:
                 versao = gravacao.criar_versao(cur, execucao_id, resumo.conjunto)
-                resumo.versao = versao.numero
-                ocorrencias: dict[str, int] = defaultdict(int)
+            con.commit()  # a versão é de quem grava os blocos, que dão commit um a um
+            resumo.versao = versao.numero
+            tratada = Tratada(con, lista, versao.id, resumo.conjunto)
+            total = Contagem()
+            gravou = False
+            chaves_aprovadas: set[str] = set()
+            # Sem chave, a carga é um retrato: encerra na quarentena o que ela substituiu.
+            retrato = None
+            if not regras.regras_de_chave(lista):
+                retrato = gravacao.Retrato(next((r.coluna for r in lista if r.campo == "cod_imovel"), None))
 
-                with _etapa(resumo, "staging"):
-                    for lote in leitura.lotes(local, pasta / "p2", cfg.tamanho_lote):
-                        staging, descartes = [], []
-                        for registro in lote:
-                            descarte = _descarte(registro, plano, cols, ocorrencias)
-                            (descartes if descarte else staging).append((registro, descarte))
-                        _gravar_staging(cur, execucao_id, [r for r, _ in staging])
-                        _gravar_descartes(cur, execucao_id, versao.id, entidade, cols, descartes)
-                        resumo.descartados_automaticamente += len(descartes)
-
-                log.info("Staging gravada; validando (pkg_quality.validate)")
+            posicao = 0  # posição, no arquivo inteiro, da 1ª linha do bloco
+            for bloco in leitura.tabelas(local, pasta / "p2", cfg.tamanho_lote):
                 with _etapa(resumo, "validacao"):
-                    cur.callproc("pkg_quality.validate", [execucao_id])
-                with _etapa(resumo, "tratada"):
-                    resumo.validos = int(cur.callfunc("pkg_tratada.gravar_aprovados", oracledb.DB_TYPE_NUMBER,
-                                                      [execucao_id, versao.id]))
-                with _etapa(resumo, "quarentena"):
-                    reprovados = int(cur.callfunc("pkg_tratada.gravar_reprovados", oracledb.DB_TYPE_NUMBER,
-                                                  [execucao_id, versao.id]))
-                resumo.invalidos = reprovados + resumo.descartados_automaticamente
-                with _etapa(resumo, "conclusao"):
-                    resumo.substituidos = gravacao.concluir(cur, arquivo_id, execucao_id, versao,
-                                                            resumo.lidos, resumo.validos, resumo.invalidos)
-                    cur.execute("DELETE FROM staging_registro WHERE execucao_id = :id", id=execucao_id)
-                    con.commit()
+                    perdedores = [i for i in range(len(bloco)) if posicao + i in descartes]
+                    ficam = [i for i in range(len(bloco)) if posicao + i not in descartes]
+                    textos = bloco.textos(mapeadas).iloc[ficam].reset_index(drop=True)
+                    geometrias = np.array([leitura.normalizar(bloco.geometrias[i]) for i in ficam], dtype=object)
+                    v = regras.validar(textos, geometrias, lista, ctx, repetidas=repetidas)
+                    reprovadas = set(v.reprovadas().tolist())
+                    registros = textos.to_dict("records")
+                    linhas = {d.tabela: [tratada.linha(d, registros[j], v.geometria[j])
+                                         for j in range(len(ficam)) if j not in reprovadas]
+                              for d in tratada.destinos}
+                with _etapa(resumo, "gravacao"):
+                    with con.cursor() as cur:
+                        _gravar_descartes(cur, execucao_id, versao.id, entidade, cols,
+                                          [(bloco, i, descartes[posicao + i]) for i in perdedores])
+                        _gravar_reprovados(cur, execucao_id, versao.id, entidade, bloco, ficam, v)
+                        _gravar_correcoes(cur, execucao_id, geometria, bloco, ficam, v)
+                    total.somar(tratada.gravar(linhas))  # dá o commit do bloco
+                    gravou = True
+                chaves_aprovadas.update(c for j, c in enumerate(v.chave_natural) if c is not None and j not in reprovadas)
+                if retrato and retrato.coluna_imovel:
+                    retrato.imoveis.update(t.strip() for t in textos[retrato.coluna_imovel].dropna() if t.strip())
+                resumo.descartados_automaticamente += len(perdedores)
+                resumo.invalidos += len(reprovadas) + len(perdedores)
+                resumo.validos += len(ficam) - len(reprovadas)
+                resumo.correcoes += len(v.correcoes)
+                posicao += len(bloco)
+                log.info("Bloco gravado: %d de %d registros", posicao, resumo.lidos)
+
+            with _etapa(resumo, "conclusao"):
+                total.somar(tratada.finalizar())
+                with con.cursor() as cur:
+                    resumo.substituidos = gravacao.concluir(cur, arquivo_id, execucao_id, versao, resumo.lidos,
+                                                            resumo.validos, resumo.invalidos, chaves_aprovadas, retrato)
+                con.commit()
+            resumo.inseridos, resumo.alterados = total.inseridos, total.alterados
+            resumo.iguais, resumo.removidos = total.iguais, total.removidos
         except Exception:
             con.rollback()
+            # Versão que não chegou a receber nenhum bloco não fica para trás vazia.
+            if resumo.versao is not None and not gravou:
+                _apagar_versao_vazia(con, execucao_id)
             raise
 
-        with _etapa(resumo, "indicadores"):
-            resumo.indicadores = _recalcular_indicadores(con, resumo.conjunto)
+        # Nada mudou na Tratada: os indicadores continuam valendo.
+        if resumo.inseridos or resumo.alterados or resumo.removidos:
+            with _etapa(resumo, "indicadores"):
+                resumo.indicadores = _recalcular_indicadores(con, resumo.conjunto)
     log.info("Arquivo %s processado: %s", arquivo_id, resumo)
     log.info("Tempos do arquivo %s (s): %s", arquivo_id, _tempos(resumo))
     return resumo
@@ -166,7 +228,7 @@ def _etapa(resumo: Resumo, nome: str):
     try:
         yield
     finally:
-        resumo.tempos[nome] = round(time.monotonic() - inicio, 1)
+        resumo.tempos[nome] = round(resumo.tempos.get(nome, 0) + time.monotonic() - inicio, 1)
 
 
 def _tempos(resumo: Resumo) -> str:
@@ -204,46 +266,94 @@ def _planejar(cols: ColunasDesempate, valores: dict[str, list]) -> dict[str, Des
     return plano
 
 
-def _descarte(registro: leitura.Registro, plano: dict[str, Desempate], cols: ColunasDesempate | None,
-              ocorrencias: dict[str, int]):
-    """O Descarte do registro, se o desempate o tirou; senão None (vai para a staging)."""
-    if not plano or cols is None:
-        return None
-    codigo = leitura.texto(registro.atributos.get(cols.codigo))
-    codigo = codigo.strip() if codigo else codigo
-    regra = plano.get(codigo)
-    if regra is None:
-        return None
-    ocorrencias[codigo] += 1
-    return regra.descartes.get(ocorrencias[codigo])
+def _descartes(plano: dict[str, Desempate], cols: ColunasDesempate, valores: dict[str, list]) -> dict:
+    """Os perdedores do desempate: posição no arquivo -> Descarte. A n-ésima vez que um código
+    aparece é a ocorrência n do plano."""
+    if not plano:
+        return {}
+    ocorrencias: dict[str, int] = defaultdict(int)
+    perdedores = {}
+    for posicao, valor in enumerate(valores[cols.codigo]):
+        codigo = leitura.texto(valor)
+        codigo = codigo.strip() if codigo else codigo
+        regra = plano.get(codigo)
+        if regra is None:
+            continue
+        ocorrencias[codigo] += 1
+        descarte = regra.descartes.get(ocorrencias[codigo])
+        if descarte:
+            perdedores[posicao] = descarte
+    return perdedores
 
 
 # ------------------------------------------------------------------ gravação
-
-def _gravar_staging(cur, execucao_id: int, registros: list[leitura.Registro]) -> None:
-    if not registros:
-        return
-    cur.setinputsizes(atributos=oracledb.DB_TYPE_CLOB, geometria_wkb=oracledb.DB_TYPE_BLOB)
-    cur.executemany(SQL_STAGING, [
-        {"execucao_id": execucao_id, "camada": r.camada[:260], "numero_linha": r.linha,
-         "atributos": leitura.atributos_json(r.atributos), "geometria_wkb": leitura.wkb(r.geometria)}
-        for r in registros
-    ])
-
 
 def _gravar_descartes(cur, execucao_id: int, versao_id: int, entidade: str | None,
                       cols: ColunasDesempate | None, descartes) -> None:
     if not descartes:
         return
-    cur.setinputsizes(payload=oracledb.DB_TYPE_CLOB, geometria_wkb=oracledb.DB_TYPE_BLOB)
+    tipos = sdo.TiposSdo(cur.connection)
+    cur.setinputsizes(payload=oracledb.DB_TYPE_CLOB, geometria=tipos.geometria)
     cur.executemany(SQL_DESCARTE, [
-        {"execucao_id": execucao_id, "numero_linha": r.linha, "campo": cols.codigo,
-         "motivo": d.motivo[:400], "payload": leitura.atributos_json(r.atributos), "entidade": entidade,
-         "chave_natural": (leitura.texto(r.atributos.get(cols.codigo)) or "").strip()[:400] or None,
-         "dataset_versao_id": versao_id,
-         "geometria_wkb": leitura.wkb(r.geometria), "justificativa": d.justificativa[:4000],
-         "autor": gravacao.AUTOR_DESCARTE_AUTOMATICO}
-        for r, d in descartes
+        {"execucao_id": execucao_id, "numero_linha": bloco.linhas[i], "campo": cols.codigo,
+         "motivo": d.motivo[:400], "payload": leitura.atributos_json(bloco.registro(i)), "entidade": entidade,
+         "chave_natural": (leitura.texto(bloco.atributos.get(cols.codigo, [None] * len(bloco))[i]) or "").strip()[:400]
+                          or None,
+         "dataset_versao_id": versao_id, "geometria": _sdo_ou_nada(tipos, leitura.normalizar(bloco.geometrias[i])),
+         "justificativa": d.justificativa[:4000], "autor": gravacao.AUTOR_DESCARTE_AUTOMATICO}
+        for bloco, i, d in descartes
+    ])
+
+
+def _gravar_reprovados(cur, execucao_id: int, versao_id: int, entidade: str | None, bloco: leitura.Tabela,
+                       ficam: list[int], v: regras.Validacao) -> None:
+    if v.erros.empty:
+        return
+    tipos = sdo.TiposSdo(cur.connection)
+    cur.setinputsizes(payload=oracledb.DB_TYPE_CLOB, geometria=tipos.geometria)
+    cur.executemany(SQL_REPROVADO, [
+        {"execucao_id": execucao_id, "numero_linha": bloco.linhas[ficam[r.linha]], "campo": r.campo,
+         "motivo": r.motivo or "Reprovado na validação.", "payload": leitura.atributos_json(bloco.registro(ficam[r.linha])),
+         "entidade": entidade, "chave_natural": v.chave_natural.iloc[r.linha], "tipo_erro": r.tipo_erro,
+         "valor_recebido": r.valor_recebido, "dataset_versao_id": versao_id,
+         "geometria": _sdo_ou_nada(tipos, v.geometria[r.linha])}
+        for r in regras.motivo_da_linha(v.erros).itertuples()
+    ])
+
+
+def _apagar_versao_vazia(con, execucao_id: int) -> None:
+    try:
+        with con.cursor() as cur:
+            cur.execute("""DELETE FROM dataset_versao d WHERE d.execucao_id = :e
+                            AND NOT EXISTS (SELECT 1 FROM registro_quarentena q WHERE q.dataset_versao_id = d.id)""",
+                        e=execucao_id)
+        con.commit()
+    except oracledb.DatabaseError:  # a limpeza não pode esconder o erro original
+        log.exception("Não deu para apagar a versão vazia da execução %s", execucao_id)
+        con.rollback()
+
+
+def _sdo_ou_nada(tipos: sdo.TiposSdo, geometria):
+    """Na quarentena, geometria de tipo que o Oracle não guarda (coleção) fica de fora: o motivo
+    já diz o tipo que veio."""
+    try:
+        return tipos.converter(geometria)
+    except ValueError:
+        return None
+
+
+def _gravar_correcoes(cur, execucao_id: int, geometria: regras.Regra | None, bloco: leitura.Tabela,
+                      ficam: list[int], v: regras.Validacao) -> None:
+    if v.correcoes.empty:
+        return
+    tipos = sdo.TiposSdo(cur.connection)
+    cur.setinputsizes(original=tipos.geometria, corrigida=tipos.geometria)
+    cur.executemany(SQL_CORRECAO, [
+        {"execucao_id": execucao_id, "camada": bloco.camadas[ficam[c.linha]][:260],
+         "numero_linha": bloco.linhas[ficam[c.linha]], "chave_natural": v.chave_natural.iloc[c.linha],
+         "coluna": geometria.coluna, "erro_original": c.erro_original,
+         "original": tipos.converter(c.geometria_original), "corrigida": tipos.converter(c.geometria_corrigida)}
+        for c in v.correcoes.itertuples()
     ])
 
 

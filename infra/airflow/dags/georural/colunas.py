@@ -62,6 +62,19 @@ class Levantamento:
         if geometria is not None:
             self.tem_geometria = True
 
+    def acrescentar_tabela(self, bloco) -> None:
+        """O mesmo que acrescentar, para um bloco inteiro (leitura.Tabela)."""
+        for nome, valores in bloco.atributos.items():
+            amostra = self.amostra.get(nome)
+            if amostra is None:
+                self.nomes.append(nome)
+                amostra = self.amostra[nome] = []
+            if len(amostra) < AMOSTRA:
+                amostra.extend(v for v in valores if v is not None)
+                del amostra[AMOSTRA:]
+        if any(g is not None for g in bloco.geometrias):
+            self.tem_geometria = True
+
 
 def detectar_colunas(con, fonte_id: int, levantamento: Levantamento) -> int:
     """MERGE em fonte_coluna. Devolve quantas colunas novas apareceram. Não dá commit."""

@@ -3,10 +3,9 @@
 
 Processa um arquivo da zona bruta, por um de dois caminhos:
 
-* **CAR** (`car.py`): o shapefile de imóveis da fonte CAR (.zip), com as regras em Python, o mesmo
-  que o processamento Java do back-end faz.
+* **CAR** (`car.py`): o shapefile de imóveis da fonte CAR (.zip), com as regras em Python.
 * **genérico** (`generico.py`): todo o resto (fontes por link, GeoJSON), guiado pelo mapeamento da
-  fonte (regra_campo): staging → `pkg_quality.validate` → `pkg_tratada` (Tratada e quarentena).
+  fonte (regra_campo): regras em Python (`regras.py`), Tratada só com o que mudou (`tratada.py`) e quarentena.
   Sem mapeamento, o arquivo fica AGUARDANDO_MAPEAMENTO, com as colunas registradas.
 
 **Como é disparada**

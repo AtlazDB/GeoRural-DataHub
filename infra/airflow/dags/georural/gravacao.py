@@ -3,10 +3,11 @@ do back-end. Usa as tabelas como estão hoje (Flyway V1 a V7).
 
 A gravação dos aprovados ainda é o MERGE daqui; a quarentena já sai completa (tabela de
 destino, chave, tipo de erro, versão e geometria), que é o que o "Revalidar" da tela precisa
-para o pkg_tratada.gravar_registro gravar o registro depois.
+para o "Revalidar" gravar o registro depois.
 """
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 
 import oracledb
 import shapely
@@ -32,7 +33,7 @@ TABELA_INSUMO = "input_feature"
 # Tabela de destino gravada na quarentena (registro_quarentena.entidade), a mesma da regra_campo
 ENTIDADE_IMOVEIS = "imovel_rural"
 # Quem aparece como autor da análise nos registros que a própria DAG descarta. O começo
-# ("DAG processar_arquivo") é o que o pkg_tratada.substituir_pendentes procura para
+# ("DAG processar_arquivo") é o que o substituir_pendentes procura para
 # encerrar esses descartes quando uma carga mais nova decide de novo: não mude sem mudar lá.
 AUTOR_DESCARTE_AUTOMATICO = "DAG processar_arquivo (desempate de código repetido)"
 
@@ -257,12 +258,136 @@ def geometria_quarentena(tipos: sdo.TiposSdo, geometria):
     return tipos.converter(shapely.orient_polygons(geometria, exterior_cw=False), sdo.SRID_BANCO)
 
 
+# Quem aparece como autor quando a carga encerra um registro antigo da quarentena.
+AUTOR_SUBSTITUICAO = "Carga (substituir_pendentes)"
+# Registro que ainda pode ser substituído: em aberto, ou descartado pela própria DAG (uma carga mais
+# nova decide de novo). Descarte feito por uma pessoa não muda.
+_EM_ABERTO = """(q.status_analise IN ('PENDENTE', 'EM_ANALISE')
+                 OR (q.status_analise = 'DESCARTADO' AND q.analisado_por LIKE :automatico))"""
+_SUBSTITUIR = """UPDATE registro_quarentena q
+                    SET q.status_analise = 'SUBSTITUIDO', q.justificativa = :motivo,
+                        q.analisado_por = :autor, q.analisado_em = SYSTIMESTAMP"""
+
+
+@dataclass
+class Retrato:
+    """Uma carga sem chave: ela substitui o que veio antes. `coluna_imovel`: a coluna do cod_imovel
+    na fonte, quando a carga é um retrato por imóvel (a Reserva Legal), e `imoveis`, os que vieram
+    nela; sem a coluna, o retrato é do conjunto inteiro."""
+    coluna_imovel: str | None = None
+    imoveis: set[str] = field(default_factory=set)
+
+    def substitui(self, payload: str | None) -> bool:
+        """Esta carga substitui o registro antigo da quarentena com este payload?"""
+        if self.coluna_imovel is None:
+            return True
+        valor = json.loads(payload).get(self.coluna_imovel) if payload else None
+        return isinstance(valor, str) and valor.strip() in self.imoveis
+
+
+def substituir_pendentes(cur, execucao_id: int, chaves_aprovadas: set[str] | None = None,
+                         retrato: Retrato | None = None) -> int:
+    """Encerra como SUBSTITUIDO o que esta carga resolveu, para reprocessar não duplicar a fila:
+
+        1. o mesmo arquivo processado de novo: o que ficou aberto das execuções anteriores;
+        2. outro arquivo, de versão anterior do conjunto, com um código que esta carga reprovou de
+           novo (o problema agora está no registro novo) ou aprovou;
+        3. na carga sem chave (`retrato`), o que veio de versões anteriores do mesmo imóvel, ou do
+           conjunto: o registro antigo não tem código para comparar, e a carga trouxe o retrato novo.
+           Sem isso, cada carga da Reserva Legal repetia na fila os mesmos registros reprovados.
+
+    `chaves_aprovadas`: as chaves naturais aprovadas nesta carga. Na carga incremental (generico.py)
+    é preciso passar: a linha igual não é regravada e fica com a versão antiga, então a tabela de
+    destino não diz o que esta carga aprovou. Sem ela (car.py, que regrava tudo), olha a tabela.
+    """
+    cur.execute("""SELECT e.arquivo_bruto_id, a.fonte_id FROM execucao e
+                     JOIN arquivo_bruto a ON a.id = e.arquivo_bruto_id WHERE e.id = :e""", e=execucao_id)
+    arquivo_id, fonte_id = cur.fetchone()
+    cur.execute("SELECT MAX(id) FROM dataset_versao WHERE execucao_id = :e", e=execucao_id)
+    versao_id = cur.fetchone()[0]
+    numero, conjunto = None, None
+    if versao_id is not None:
+        cur.execute("SELECT versao, conjunto FROM dataset_versao WHERE id = :id", id=versao_id)
+        numero, conjunto = cur.fetchone()
+
+    de_versao = f" (versão {numero} de {conjunto})" if numero is not None else ""
+    binds = {"motivo": f"Substituído pela carga da execução {execucao_id}{de_versao}, que tratou este registro de novo.",
+             "autor": AUTOR_SUBSTITUICAO, "automatico": "DAG processar_arquivo%"}
+
+    cur.execute(f"""{_SUBSTITUIR} WHERE {_EM_ABERTO}
+                      AND q.execucao_id IN (SELECT e.id FROM execucao e
+                                             WHERE e.arquivo_bruto_id = :arquivo AND e.id <> :execucao)""",
+                arquivo=arquivo_id, execucao=execucao_id, **binds)
+    total = cur.rowcount
+    if conjunto is None:
+        return total  # carga sem versão de dados: não há "mais nova" para comparar
+
+    anteriores = """q.execucao_id IN (SELECT dv.execucao_id FROM dataset_versao dv
+                                       WHERE dv.conjunto = :conjunto AND dv.versao < :versao)"""
+    cur.execute(f"""{_SUBSTITUIR} WHERE {_EM_ABERTO} AND q.chave_natural IS NOT NULL AND {anteriores}
+                      AND EXISTS (SELECT 1 FROM registro_quarentena n
+                                   WHERE n.execucao_id = :execucao AND n.chave_natural = q.chave_natural)""",
+                conjunto=conjunto, versao=numero, execucao=execucao_id, **binds)
+    total += cur.rowcount
+
+    if retrato is not None:
+        total += _substituir_no_retrato(cur, retrato, anteriores, conjunto, numero, binds)
+
+    if chaves_aprovadas is not None:
+        cur.execute(f"""SELECT q.id, q.chave_natural FROM registro_quarentena q
+                         WHERE {_EM_ABERTO} AND q.chave_natural IS NOT NULL AND {anteriores}""",
+                    automatico=binds["automatico"], conjunto=conjunto, versao=numero)
+        resolvidos = [{"id": i, "motivo": binds["motivo"], "autor": binds["autor"]}
+                      for i, chave in cur.fetchall() if chave in chaves_aprovadas]
+        if resolvidos:
+            cur.executemany("""UPDATE registro_quarentena
+                                  SET status_analise = 'SUBSTITUIDO', justificativa = :motivo,
+                                      analisado_por = :autor, analisado_em = SYSTIMESTAMP
+                                WHERE id = :id""", resolvidos)
+        return total + len(resolvidos)
+
+    # A chave montada como a chave_natural: as colunas de chave na ordem da fonte, unidas por "|".
+    # Se a formatação não bater (chave numérica ou data), o registro fica pendente: nunca é
+    # encerrado por engano.
+    cur.execute("""SELECT LOWER(rc.destino_tabela), LOWER(rc.campo_destino) FROM regra_campo rc
+                     JOIN fonte_coluna fc ON fc.id = rc.fonte_coluna_id
+                    WHERE rc.fonte_id = :fonte AND rc.chave = 1
+                    ORDER BY fc.ordem NULLS LAST, fc.nome_coluna""", fonte=fonte_id)
+    colunas_por_tabela: dict[str, list[str]] = {}
+    for tabela, campo in cur.fetchall():
+        colunas_por_tabela.setdefault(tabela, []).append(campo)
+    for tabela, campos in colunas_por_tabela.items():
+        chave = " || '|' || ".join(f"TO_CHAR(d.{c})" for c in campos)
+        cur.execute(f"""{_SUBSTITUIR} WHERE {_EM_ABERTO} AND q.chave_natural IS NOT NULL
+                          AND LOWER(q.entidade) = :tabela AND {anteriores}
+                          AND EXISTS (SELECT 1 FROM {tabela} d
+                                       WHERE {chave} = q.chave_natural AND d.dataset_versao_id = :versao_id)""",
+                    tabela=tabela, conjunto=conjunto, versao=numero, versao_id=versao_id, **binds)
+        total += cur.rowcount
+    return total
+
+
+def _substituir_no_retrato(cur, retrato: Retrato, anteriores: str, conjunto: str, numero: int, binds: dict) -> int:
+    cur.execute(f"""SELECT q.id, q.payload FROM registro_quarentena q
+                     WHERE {_EM_ABERTO} AND q.chave_natural IS NULL AND {anteriores}""",
+                automatico=binds["automatico"], conjunto=conjunto, versao=numero)
+    substituidos = [{"id": i, "motivo": binds["motivo"], "autor": binds["autor"]} for i, payload in cur.fetchall()
+                    if retrato.substitui(payload.read() if hasattr(payload, "read") else payload)]
+    if substituidos:
+        cur.executemany("""UPDATE registro_quarentena
+                              SET status_analise = 'SUBSTITUIDO', justificativa = :motivo,
+                                  analisado_por = :autor, analisado_em = SYSTIMESTAMP
+                            WHERE id = :id""", substituidos)
+    return len(substituidos)
+
+
 # ------------------------------------------------------------------ fim
 
 def concluir(cur, arquivo_id: int, execucao_id: int, versao: Versao,
-             lidos: int, validos: int, invalidos: int) -> int:
+             lidos: int, validos: int, invalidos: int, chaves_aprovadas: set[str] | None = None,
+             retrato: "Retrato | None" = None) -> int:
     """Fecha a carga. Devolve quantos registros antigos da quarentena ela substituiu
-    (pkg_tratada.substituir_pendentes: reprocessar não duplica a fila)."""
+    (substituir_pendentes: reprocessar não duplica a fila)."""
     cur.execute(
         """
         UPDATE execucao SET status = 'CONCLUIDA', finalizada_em = SYSTIMESTAMP,
@@ -272,7 +397,7 @@ def concluir(cur, arquivo_id: int, execucao_id: int, versao: Versao,
         lidos=lidos, validos=validos, invalidos=invalidos, id=execucao_id,
     )
     cur.execute("UPDATE dataset_versao SET registros = :n WHERE id = :id", n=validos, id=versao.id)
-    substituidos = int(cur.callfunc("pkg_tratada.substituir_pendentes", oracledb.DB_TYPE_NUMBER, [execucao_id]))
+    substituidos = substituir_pendentes(cur, execucao_id, chaves_aprovadas, retrato)
     cur.execute(
         "UPDATE arquivo_bruto SET status = 'PROCESSADO', processado_em = SYSTIMESTAMP WHERE id = :id",
         id=arquivo_id,
