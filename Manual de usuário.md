@@ -426,7 +426,9 @@ Registros que não cumpriram alguma regra. O dado original nunca é alterado: a 
 
 **Visão geral:**
 
-- **Métricas:** Total retido, Pendentes, Em análise, Corrigidos, Revalidados e Descartados. Clicar
+- **Métricas:** Total retido, Pendentes, Em análise, Corrigidos, Revalidados e Descartados. Os
+  Substituídos ficam guardados, mas não contam no total nem aparecem na lista geral. Registros sem
+  geometria e com área declarada 0 já chegam como Descartados, com a justificativa. Clicar
   num cartão filtra a lista por aquele status; clicar de novo desfaz o filtro.
 - **Filtros:** Buscar (código, campo ou motivo), Tipo de erro, Fonte e Status. **Limpar** remove
   todos.

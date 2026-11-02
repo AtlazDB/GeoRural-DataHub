@@ -105,8 +105,13 @@ upload, "Processar" (API REST) ou coletar_fonte
   por imovel (`cod_imovel`) ou pelo conjunto da fonte, saindo so o que nao veio mais. A linha igual
   nao e tocada e fica com a versao da carga que a gravou. Se a carga falhar no meio, os blocos ja
   gravados ficam, e a proxima so refaz o que falta.
-* **Quarentena sem duplicar:** cada carga encerra como SUBSTITUIDO o que ela resolveu. Com chave, pelo
-  codigo; sem chave, pelo imovel (`cod_imovel`) ou pelo conjunto da fonte.
+* **Quarentena sem duplicar:** cada reprovado tem um hash (dados, geometria e motivo). Igual ao que ja
+  esta na quarentena, nao e gravado de novo: em aberto, passa para a carga nova; decidido pelo analista,
+  a decisao fica. O que mudou encerra o antigo como SUBSTITUIDO: com chave, pelo codigo; sem chave, pelo
+  imovel (`cod_imovel`) ou pelo conjunto da fonte. SUBSTITUIDO e historico: fica no banco, mas nao conta
+  no "Total retido" nem aparece na lista geral da tela.
+* **Linha sem dados:** sem geometria e com area declarada 0 ja entra como DESCARTADO, com a justificativa
+  (`regras.linhas_sem_dados`): nao ha o que corrigir. Vale no caminho generico.
 * **Geometria:** quem julga e o Shapely (GEOS, padrao OGC, sem tolerancia). O Oracle considerava
   encostado o que fica a menos de 5 cm e reprovava ~5% dos poligonos da Reserva Legal por detalhes de
   centimetros; esses entram como vieram. O Oracle so guarda e filtra (`SDO_FILTER`, `SDO_RELATE`):

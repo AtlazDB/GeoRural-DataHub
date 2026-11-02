@@ -317,3 +317,81 @@ def test_retrato_por_imovel_so_substitui_o_imovel_que_veio():
 def test_retrato_do_conjunto_substitui_tudo():
     assert gravacao.Retrato().substitui(json.dumps({"qualquer": "coisa"}))
     assert gravacao.Retrato().substitui(None)
+
+
+# ------------------------------------------------------------------ hash na quarentena
+
+class CursorDaFila:
+    def __init__(self, linhas=()):
+        self.linhas, self.atualizados = list(linhas), []
+
+    def execute(self, *_a, **_k):
+        pass
+
+    def fetchall(self):
+        return self.linhas
+
+    def executemany(self, _sql, binds):
+        self.atualizados.extend(binds)
+
+
+def _fila(*linhas, com_chave=True):
+    return gravacao.carregar_fila(CursorDaFila(linhas), "reserva_legal", com_chave)
+
+
+def test_hash_da_quarentena_nao_depende_da_ordem_das_colunas():
+    ponto = Point(1, 2)
+    assert gravacao.hash_quarentena('{"a": "1", "b": "2"}', "a", "T", "m", ponto) \
+        == gravacao.hash_quarentena('{"b": "2", "a": "1"}', "a", "T", "m", ponto)
+
+
+@pytest.mark.parametrize("outro", [
+    ('{"a": "9"}', "a", "T", "m", Point(1, 2)),  # o dado mudou na fonte
+    ('{"a": "1"}', "a", "T", "m", Point(9, 9)),  # a geometria mudou
+    ('{"a": "1"}', "a", "T", "outro motivo", Point(1, 2)),  # a regra mudou
+])
+def test_hash_da_quarentena_muda_com_o_dado_a_geometria_e_o_motivo(outro):
+    assert gravacao.hash_quarentena('{"a": "1"}', "a", "T", "m", Point(1, 2)) != gravacao.hash_quarentena(*outro)
+
+
+def test_reprovado_diferente_e_gravado():
+    cur = CursorDaFila()
+    fila = _fila((1, "h1", "PENDENTE", None))
+
+    assert fila.so_os_novos(cur, 9, 90, [("h2", 5, "registro")]) == [("h2", "registro")]
+    assert cur.atualizados == [] and fila.iguais == 0
+
+
+@pytest.mark.parametrize("status,autor", [("PENDENTE", None), ("EM_ANALISE", None), ("CORRIGIDO", "ana"),
+                                          ("DESCARTADO", gravacao.AUTOR_DESCARTE_AUTOMATICO),
+                                          ("DESCARTADO", gravacao.AUTOR_SEM_DADOS)])
+def test_igual_em_aberto_nao_e_gravado_e_passa_para_esta_carga(status, autor):
+    cur = CursorDaFila()
+    fila = _fila((1, "h1", status, autor))
+
+    assert fila.so_os_novos(cur, 9, 90, [("h1", 5, "registro")]) == []
+    assert cur.atualizados == [{"id": 1, "execucao": 9, "versao": 90, "linha": 5}]
+    assert fila.iguais == 1
+
+
+def test_igual_descartado_pelo_analista_nao_volta_e_a_decisao_fica():
+    cur = CursorDaFila()
+    fila = _fila((1, "h1", "DESCARTADO", "ana"))
+
+    assert fila.so_os_novos(cur, 9, 90, [("h1", 5, "registro")]) == []
+    assert cur.atualizados == []
+
+
+def test_revalidado_so_conta_com_chave():
+    assert _fila((1, "h1", "REVALIDADO", "ana")).so_os_novos(CursorDaFila(), 9, 90, [("h1", 5, "r")]) == []
+    # Na carga-retrato o revalidado é apagado da Tratada: o reprovado precisa voltar para a fila.
+    assert _fila((1, "h1", "REVALIDADO", "ana"), com_chave=False).so_os_novos(CursorDaFila(), 9, 90, [("h1", 5, "r")]) \
+        == [("h1", "r")]
+
+
+def test_linhas_identicas_no_arquivo_continuam_sendo_um_registro_cada():
+    cur = CursorDaFila()
+    fila = _fila((1, "h1", "PENDENTE", None))
+
+    assert fila.so_os_novos(cur, 9, 90, [("h1", 5, "a"), ("h1", 6, "b")]) == [("h1", "b")]
+    assert [a["id"] for a in cur.atualizados] == [1]

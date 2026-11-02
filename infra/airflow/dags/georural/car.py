@@ -37,6 +37,7 @@ class Resumo:
     invalidos: int = 0
     descartados_automaticamente: int = 0  # dentro de `invalidos`: repetições resolvidas pelo desempate
     substituidos: int = 0  # registros abertos de cargas anteriores que esta carga encerrou
+    quarentena_iguais: int = 0  # dentro de `invalidos`: já estavam na quarentena, não foram gravados de novo
 
 
 def preparar(cfg: Config, arquivo_id: int, ja_reservado: bool, dag_run_id: str | None) -> int:
@@ -78,13 +79,15 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
                 with con.cursor() as cur:
                     versao = gravacao.criar_versao(cur, execucao_id)
                     resumo = Resumo(arquivo_id=arquivo_id, execucao_id=execucao_id, versao=versao.numero)
+                    fila = gravacao.carregar_fila(cur, gravacao.CONJUNTO_IMOVEIS, com_chave=True)
 
                     for shp in shapefiles:
                         log.info("Lendo %s", shp.name)
                         for primeira_linha, lote in shapefile.ler_em_lotes(shp, cfg.tamanho_lote):
-                            _gravar_lote(cur, validador, lote, primeira_linha, versao, execucao_id, resumo)
+                            _gravar_lote(cur, validador, lote, primeira_linha, versao, execucao_id, resumo, fila)
                             log.info("%s: %d lidos até agora", shp.name, resumo.lidos)
 
+                    resumo.quarentena_iguais = fila.iguais
                     resumo.substituidos = gravacao.concluir(cur, arquivo_id, execucao_id, versao,
                                                             resumo.lidos, resumo.validos, resumo.invalidos)
                 con.commit()
@@ -107,7 +110,7 @@ def _planejar_desempate(shapefiles):
     return plano
 
 
-def _gravar_lote(cur, validador, lote, primeira_linha, versao, execucao_id, resumo: Resumo) -> None:
+def _gravar_lote(cur, validador, lote, primeira_linha, versao, execucao_id, resumo: Resumo, fila) -> None:
     colunas = [c for c in lote.columns if c != lote.geometry.name]
     aprovados, reprovados = [], []
 
@@ -118,7 +121,7 @@ def _gravar_lote(cur, validador, lote, primeira_linha, versao, execucao_id, resu
         (aprovados if resultado.aprovado else reprovados).append(resultado)
 
     gravacao.gravar_imoveis(cur, versao.id, aprovados)
-    gravacao.gravar_quarentena(cur, execucao_id, versao.id, reprovados)
+    gravacao.gravar_quarentena(cur, execucao_id, versao.id, reprovados, fila)
     resumo.lidos += len(aprovados) + len(reprovados)
     resumo.validos += len(aprovados)
     resumo.invalidos += len(reprovados)

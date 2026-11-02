@@ -460,6 +460,24 @@ def motivo_da_linha(erros: pd.DataFrame) -> pd.DataFrame:
     return primeiro.join(motivo).reset_index()
 
 
+def linhas_sem_dados(v: Validacao, textos: pd.DataFrame, regras: list[Regra]) -> set[int]:
+    """Sem geometria e com área declarada 0: a linha não traz nada para o analista corrigir (na
+    Reserva Legal, 286 de 301 da fila). Só com as duas condições: área 0 com geometria é gravada, e
+    geometria nula com área maior que 0 é um dado que sumiu e precisa ser visto."""
+    area = next((r for r in regras if r.campo == "area_ha"), None)
+    if area is None or v.erros.empty:
+        return set()
+    nulas = v.erros.loc[v.erros["tipo_erro"] == "GEOMETRIA_NULA", "linha"]
+    return {int(p) for p in nulas if _zero(textos[area.coluna].iloc[p], area)}
+
+
+def _zero(valor, regra: Regra) -> bool:
+    try:
+        return converter(None if pd.isna(valor) else valor, regra) == 0
+    except (ArithmeticError, ValueError):  # não converte: já foi reprovado por isso
+        return False
+
+
 # ------------------------------------------------------------------ conversão para a Tratada
 
 def converter(valor: str | None, regra: Regra):

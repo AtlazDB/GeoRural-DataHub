@@ -227,3 +227,38 @@ def test_repetidas_no_arquivo_inteiro_valem_dentro_do_bloco():
     textos = pd.DataFrame([{"cod": "A"}, {"cod": "B"}])
     v = regras.validar(textos, np.array([None, None], dtype=object), lista, Contexto(), repetidas={"B"})
     assert _erros(v) == [(1, "CHAVE_NATURAL_DUPLICADA", "cod")]
+
+
+# ------------------------------------------------------------------ linhas sem dados
+
+def _sem_dados(linhas, geometrias):
+    lista = [_regra("num_area", "DECIMAL", 1, campo="area_ha"), _geo()]
+    textos = pd.DataFrame(linhas, dtype="object")
+    return regras.linhas_sem_dados(regras.validar(textos, np.array(geometrias, dtype=object), lista, Contexto()), textos, lista)
+
+
+def test_sem_geometria_e_com_area_zero_nao_tem_dados():
+    assert _sem_dados([{"num_area": "0"}, {"num_area": "0.0"}], [None, None]) == {0, 1}
+
+
+def test_sem_geometria_com_area_maior_que_zero_continua_na_fila():
+    assert _sem_dados([{"num_area": "1.5"}], [None]) == set()
+
+
+def test_area_zero_com_geometria_nao_e_sem_dados():
+    assert _sem_dados([{"num_area": "0"}], [box(-51, -25, -50.9, -24.9)]) == set()
+
+
+def test_sem_geometria_sem_area_informada_continua_na_fila():
+    assert _sem_dados([{"num_area": None}], [None]) == set()
+
+
+def test_area_que_nao_converte_continua_na_fila():
+    assert _sem_dados([{"num_area": "abc"}], [None]) == set()
+
+
+def test_fonte_sem_area_mapeada_nao_descarta():
+    lista = [_regra("nome", "TEXTO", 1, campo="nome"), _geo()]
+    textos = pd.DataFrame([{"nome": "x"}], dtype="object")
+    v = regras.validar(textos, np.array([None], dtype=object), lista, Contexto())
+    assert regras.linhas_sem_dados(v, textos, lista) == set()
