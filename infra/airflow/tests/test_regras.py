@@ -194,6 +194,13 @@ def test_quarentena_junta_os_motivos_e_guarda_o_primeiro_erro():
     assert linha.motivo == "Campo obrigatório não informado. | Valor não converte para INTEIRO."
 
 
+def test_quarentena_guarda_o_valor_do_primeiro_erro_mesmo_nulo():
+    lista = [_regra("a", id_=1, obrigatorio=True), _regra("b", "INTEIRO", id_=2)]
+    v = _validar([{"a": None, "b": "x"}], lista)
+
+    assert regras.motivo_da_linha(v.erros).iloc[0].valor_recebido is None  # o "x" é do 2º erro
+
+
 def test_converter_para_o_tipo_do_destino():
     assert regras.converter(" 12 ", _regra("x", "INTEIRO")) == 12
     assert regras.converter("25,9", _regra("x", "DECIMAL", formato="VIRGULA")) == Decimal("25.9")

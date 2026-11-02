@@ -453,7 +453,9 @@ def motivo_da_linha(erros: pd.DataFrame) -> pd.DataFrame:
     """Uma linha por registro reprovado, como a quarentena guarda: o 1º erro dá o campo, o tipo e o
     valor recebido; o motivo junta todos com " | " (até 400 caracteres)."""
     ordenados = erros.sort_values(["linha", "ordem"])
-    primeiro = ordenados.groupby("linha", sort=True).first()[["campo", "tipo_erro", "valor_recebido"]]
+    # drop_duplicates, e não groupby().first(): o first pula nulos e traria o valor do 2º erro.
+    primeiro = ordenados.drop_duplicates("linha").set_index("linha")[["campo", "tipo_erro", "valor_recebido"]]
+    primeiro = primeiro.astype("object").where(primeiro.notna(), None)  # None, e não NaN, para o banco
     motivo = ordenados.groupby("linha", sort=True)["motivo"].agg(lambda m: " | ".join(m)[:400])
     return primeiro.join(motivo).reset_index()
 

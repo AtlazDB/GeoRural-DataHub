@@ -161,6 +161,7 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
             tratada = Tratada(con, lista, versao.id, resumo.conjunto)
             total = Contagem()
             gravou = False
+            chaves_aprovadas: set[str] = set()
 
             posicao = 0  # posição, no arquivo inteiro, da 1ª linha do bloco
             for bloco in leitura.tabelas(local, pasta / "p2", cfg.tamanho_lote):
@@ -183,6 +184,7 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
                         _gravar_correcoes(cur, execucao_id, geometria, bloco, ficam, v)
                     total.somar(tratada.gravar(linhas))  # dá o commit do bloco
                     gravou = True
+                chaves_aprovadas.update(c for j, c in enumerate(v.chave_natural) if c is not None and j not in reprovadas)
                 resumo.descartados_automaticamente += len(perdedores)
                 resumo.invalidos += len(reprovadas) + len(perdedores)
                 resumo.validos += len(ficam) - len(reprovadas)
@@ -193,8 +195,8 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
             with _etapa(resumo, "conclusao"):
                 total.somar(tratada.finalizar())
                 with con.cursor() as cur:
-                    resumo.substituidos = gravacao.concluir(cur, arquivo_id, execucao_id, versao,
-                                                            resumo.lidos, resumo.validos, resumo.invalidos)
+                    resumo.substituidos = gravacao.concluir(cur, arquivo_id, execucao_id, versao, resumo.lidos,
+                                                            resumo.validos, resumo.invalidos, chaves_aprovadas)
                 con.commit()
             resumo.inseridos, resumo.alterados = total.inseridos, total.alterados
             resumo.iguais, resumo.removidos = total.iguais, total.removidos
