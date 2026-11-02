@@ -52,8 +52,7 @@ SQL_DESCARTE = """
             :geometria, 'DESCARTADO', :justificativa, :autor, SYSTIMESTAMP)
 """
 
-# Reprovado nas regras: um registro por linha, com o 1º erro e todos os motivos (como o
-# pkg_tratada.gravar_reprovados fazia a partir da staging_erro).
+# Reprovado nas regras: um registro por linha, com o 1º erro e todos os motivos.
 SQL_REPROVADO = """
     INSERT INTO registro_quarentena (execucao_id, numero_linha, campo, motivo, payload, entidade,
            chave_natural, tipo_erro, valor_recebido, dataset_versao_id, geometria)

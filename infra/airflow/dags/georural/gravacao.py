@@ -3,7 +3,7 @@ do back-end. Usa as tabelas como estão hoje (Flyway V1 a V7).
 
 A gravação dos aprovados ainda é o MERGE daqui; a quarentena já sai completa (tabela de
 destino, chave, tipo de erro, versão e geometria), que é o que o "Revalidar" da tela precisa
-para o pkg_tratada.gravar_registro gravar o registro depois.
+para o "Revalidar" gravar o registro depois.
 """
 
 from dataclasses import dataclass

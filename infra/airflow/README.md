@@ -72,8 +72,8 @@ docker compose -f docker-compose.local.yaml --env-file .env.local run --rm \
   uma faixa falhar ou vier incompleta com pedidos em paralelo, a coleta segue **uma pagina por vez**
   daquela faixa em diante (a mensagem da fonte avisa) e so falha se nem assim o servidor entregar.
 * O log da coleta e a mensagem da fonte trazem a duracao; o resumo do processamento traz os
-  segundos de cada etapa (`tempos`: leitura, staging, validacao, tratada, quarentena, conclusao,
-  indicadores).
+  segundos de cada etapa (`tempos`: leitura, contexto, validacao, gravacao, conclusao, indicadores)
+  e o que a carga fez na Tratada (`inseridos`, `alterados`, `iguais`, `removidos`).
 * O andamento e o resultado aparecem na tela da fonte (`fonte.ultima_coleta_mensagem`).
 
 ### Como o processamento funciona
@@ -91,18 +91,41 @@ upload/coleta ──> arquivo_bruto (RECEBIDO) ──> varredor_bruta (a cada 2 
 ```
 
 * **Caminho do CAR** (`car.py`): o shapefile de imoveis da fonte CAR, com as regras em Python.
-  Faz o mesmo que o processamento Java (`ProcessamentoCarServiceImpl`), com duas diferencas:
-  geometria invalida vai para a **quarentena** (o Java corrigia em silencio) e a geometria
-  e **reprojetada** para 4326 de verdade (o Java so marcava como 4326).
 * **Caminho generico** (`generico.py`): todo o resto, guiado pelo mapeamento da fonte. Registra
   as colunas que vieram (`fonte_coluna`; sem mapeamento o arquivo fica AGUARDANDO_MAPEAMENTO),
-  aplica o desempate de codigo repetido quando o mapeamento tem `situacao`, grava a staging,
-  roda `pkg_quality.validate` e grava Tratada e quarentena com `pkg_tratada.gravar_aprovados` /
-  `gravar_reprovados`. No fim recalcula IRL/IFC quando o conjunto e deles.
+  aplica o desempate de codigo repetido quando o mapeamento tem `situacao`, valida com as regras
+  do mapeamento (`regras.py`) e grava a quarentena e a Tratada (`tratada.py`), com commit a cada
+  bloco. No fim recalcula IRL/IFC quando o conjunto e deles e algo mudou.
+* **So o que mudou e gravado.** Cada linha tem um hash (`hash_registro`: sha1 dos valores mapeados
+  mais a geometria). Com chave, entra a chave nova e muda a de hash diferente; sem chave, carga-retrato
+  por imovel (`cod_imovel`) ou pelo conjunto da fonte, saindo so o que nao veio mais. A linha igual
+  nao e tocada e fica com a versao da carga que a gravou. Se a carga falhar no meio, os blocos ja
+  gravados ficam, e a proxima so refaz o que falta.
+* **Geometria:** quem julga e o Shapely (GEOS, padrao OGC, sem tolerancia). O Oracle considerava
+  encostado o que fica a menos de 5 cm e reprovava ~5% dos poligonos da Reserva Legal por detalhes de
+  centimetros; esses entram como vieram. O Oracle so guarda e filtra (`SDO_FILTER`, `SDO_RELATE`):
+  indicador que calcule area ou intersecao deve ser feito aqui, em GeoPandas, para o motor que valida
+  ser o mesmo que calcula.
 * Le em lotes de `GEORURAL_TAMANHO_LOTE` registros: a memoria depende do lote,
   nao do tamanho do arquivo.
+* Medido na Reserva Legal do IAT (20 mil poligonos): 164 s com a staging e o PL/SQL de antes; 58 s
+  na 1a carga e 29 s na carga sem mudanca.
 * Na VM troque `GEORURAL_OCI_AUTH=instance_principal` e aponte `GEORURAL_DB_*` para o Oracle
   da VM; o codigo e o mesmo.
+
+### Como o "Revalidar" da quarentena funciona
+
+```
+tela ──> back-end ──> API REST do Airflow ──> DAG revalidar_registro (~3 s) ──> resposta na tela
+                      dispara, acompanha e        as mesmas regras da carga; se passar, grava
+                      le o resultado no XCom      na Tratada e encerra o registro
+```
+
+* Mesmas regras e mesma gravacao da carga (`georural/revalidacao.py`). Trava o registro, recusa o ja
+  encerrado e nao deixa um registro antigo voltar o dado de uma carga mais nova.
+* **O back-end precisa alcancar a API do Airflow:** `AIRFLOW_URL`, `AIRFLOW_USUARIO` e `AIRFLOW_SENHA`
+  no `.env` dele. Com o Airflow fora do ar, o Revalidar responde 503 com a mensagem; o resto da aplicacao segue.
+* A DAG `revalidar_registro` nasce ativa (`is_paused_upon_creation=False`).
 
 ## Subir na VM (producao)
 
@@ -163,7 +186,7 @@ cd ~/Atlaz4/infra/airflow && docker compose exec airflow-scheduler \
 - **A imagem tem nome proprio** (`atlaz4/airflow:producao`): o build nao sobrescreve a tag oficial
   `apache/airflow:3.3.1`, que na VM antiga perdia as bibliotecas a cada `docker pull`.
 - **Autonomous Database Always Free: 20 GB.** As 4 fontes do PR inteiro ocupam ~8 GB em repouso,
-  mais ~4 GB de staging no pico de uma carga grande. O banco tambem para sozinho depois de 7 dias
+  sem a staging, nao ha mais pico durante a carga. O banco tambem para sozinho depois de 7 dias
   sem uso: religue antes de uma demonstracao.
 - **A autenticacao com a OCI e por Instance Principal**, nao por chave em disco:
   dynamic group + policy na tenancy. Isso nao se recria copiando arquivo, e

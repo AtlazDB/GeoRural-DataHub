@@ -6,7 +6,7 @@ Formatos:
     .geojson / .json         uma FeatureCollection
 
 O GeoJSON é lido direto (json + shapely), sem o GDAL: os valores chegam como vieram (o GDAL
-converteria as datas ISO e trocaria os nulos dos números por NaN), e é isso que vai para a staging
+converteria as datas ISO e trocaria os nulos dos números por NaN), e é isso que vai para as regras
 e para o payload da quarentena.
 
 CRS do GeoJSON: sem "crs", ou com 4326 / CRS84 / 4674, as coordenadas ficam como estão (lon/lat;
@@ -138,7 +138,7 @@ def _ler_geojson(caminho: Path, camada: str):
                 if reprojetar is not None:
                     geometria = shapely.ops.transform(reprojetar, geometria)
             except (ValueError, TypeError, AttributeError, shapely.errors.GEOSException):
-                geometria = None  # o pkg_quality reprova (GEOMETRIA_NULA) se ela for obrigatória
+                geometria = None  # as regras reprovam (GEOMETRIA_NULA) se ela for obrigatória
         yield camada, atributos, geometria
 
 
@@ -175,10 +175,10 @@ def _valor_python(valor):
     return valor
 
 
-# ------------------------------------------------------------------ staging
+# ------------------------------------------------------------------ texto e WKB
 
 def texto(valor) -> str | None:
-    """O valor como texto, do jeito que as regras do pkg_quality leem: número com ponto e sem
+    """O valor como texto, do jeito que as regras (regras.py) leem: número com ponto e sem
     notação científica, booleano SIM/NÃO, objeto e lista em JSON."""
     if valor is None:
         return None
@@ -215,7 +215,7 @@ def normalizar(geometria: BaseGeometry | None) -> BaseGeometry | None:
       serviços guardam no horário).
 
     Erro de topologia de verdade (autocruzamento) continua como veio: quem decide é a política
-    de geometria da regra (QUARENTENA ou CORRIGIR_E_REGISTRAR, no pkg_quality).
+    de geometria da regra (QUARENTENA ou CORRIGIR_E_REGISTRAR, em regras.py).
     """
     if geometria is None or geometria.is_empty:
         return None
