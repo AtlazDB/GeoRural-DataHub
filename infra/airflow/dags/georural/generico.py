@@ -145,7 +145,7 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
         repetidas = {c for c, n in contagem_chaves.items() if n > 1}
         del chaves, contagem_chaves
 
-        resumo.conjunto = gravacao.CONJUNTO_DA_TABELA.get(mapa.tabela, mapa.tabela)
+        resumo.conjunto = gravacao.conjunto_da_carga(mapa.tabela, arquivo.sigla_fonte)
         entidade = mapa.tabela if len(mapa.tabelas) == 1 else None
         geometria = next((r for r in lista if r.tipo == "GEOMETRIA"), None)
 

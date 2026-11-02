@@ -8,7 +8,7 @@ import pytest
 import shapely
 from shapely.geometry import Polygon
 
-from georural import leitura
+from georural import gravacao, leitura
 from georural.colunas import Levantamento, tipo_percebido
 from georural.validacao import ColunasDesempate, planejar_desempate
 
@@ -131,3 +131,20 @@ def test_wkb_anel_minusculo_que_colapsaria_vai_como_veio():
     poligono = Polygon([(-51, -25), (-50, -25), (-50, -24), (-51, -24)], [furo])
     resultado = shapely.from_wkb(leitura.wkb(poligono))
     assert resultado.geom_type == "Polygon" and len(resultado.interiors) == 1
+
+
+def test_input_feature_tem_um_conjunto_por_fonte():
+    assert gravacao.conjunto_da_carga("input_feature", "IAT-X") == "insumo_iat-x"
+    assert gravacao.conjunto_da_carga("input_feature", "EMBARGO") == "insumo_embargo"
+
+
+def test_tabelas_de_sempre_continuam_com_o_mesmo_conjunto():
+    assert gravacao.conjunto_da_carga("car_reserva_legal", "IAT-X") == "reserva_legal"
+    assert gravacao.conjunto_da_carga("imovel_rural", "CAR-WFS") == gravacao.CONJUNTO_IMOVEIS
+    assert gravacao.conjunto_da_carga("foco_calor", "FOCOS-IAT") == "focos_calor"
+    assert gravacao.conjunto_da_carga("municipio", "MUN-IAT") == "municipios"
+
+
+def test_conjunto_do_insumo_cabe_na_coluna():
+    # dataset_versao.conjunto é VARCHAR2(60); fonte.sigla, VARCHAR2(12)
+    assert len(gravacao.conjunto_da_carga("input_feature", "X" * 12)) <= 60
