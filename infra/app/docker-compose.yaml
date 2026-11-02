@@ -36,6 +36,10 @@ services:
       - OCI_BUCKET=${OCI_BUCKET}
       - OCI_ZONA_BRUTA=${OCI_ZONA_BRUTA:-bruta}
       - APP_CORS_ORIGENS=${APP_CORS_ORIGENS:-http://localhost:*}
+      # Os botoes disparam as DAGs pela API REST do Airflow.
+      - AIRFLOW_URL=${AIRFLOW_URL:-http://localhost:8088}
+      - AIRFLOW_USUARIO=${AIRFLOW_USUARIO:-}
+      - AIRFLOW_SENHA=${AIRFLOW_SENHA:-}
     # O back le ~/.oci/config (ConfigFileAuthenticationDetailsProvider). A pasta e montada
     # em /root/.oci e tambem no caminho original, para o key_file do config funcionar
     # tanto com "~/.oci/..." quanto com caminho absoluto.
