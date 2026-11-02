@@ -15,7 +15,9 @@ As páginas são pedidas em paralelo. A primeira vai sozinha: é ela que diz qua
 servidor entrega de verdade por pedido. Com o total e esse tamanho, as demais viram faixas fixas
 (deslocamento, tamanho), baixadas por até PARALELO pedidos ao mesmo tempo e gravadas no zip na
 ordem dos deslocamentos, não na de chegada: o zip sai igual com 1 ou com N pedidos, e o hash
-continua dizendo se a fonte mudou. Só PARALELO páginas ficam na memória por vez.
+continua dizendo se a fonte mudou. Só PARALELO páginas ficam na memória por vez. Se uma faixa
+falhar ou vier incompleta com pedidos em paralelo, a coleta não desiste: daquela faixa em diante
+segue uma página por vez, e só falha se nem assim o servidor entregar.
 
 Cada página entra num zip já comprimida (parte-0001.geojson, parte-0002.geojson, ...), assim que
 chega: o GeoJSON cru nunca fica inteiro em disco nem na memória. O zip é determinístico (data fixa
@@ -110,7 +112,8 @@ class Resultado:
         if self.coletados is None:
             return f"Arquivo baixado ({_formatar(self.tamanho)} bytes)."
         duracao = f" em {_duracao(self.segundos)}" if self.segundos is not None else ""
-        return f"{_formatar(self.coletados)} registros coletados em {self.paginas} página(s){duracao}."
+        texto = f"{_formatar(self.coletados)} registros coletados em {self.paginas} página(s){duracao}."
+        return " ".join([texto, *self.avisos])
 
 
 def _formatar(numero: int) -> str:
@@ -360,6 +363,7 @@ def _paginar(servico: _Servico, url: str, pasta: Path, sigla: str, pausa: float,
     caminho = pasta / nome
     coletados = paginas = repetidos = 0
     vistos: set = set()
+    avisos: list[str] = []
 
     with zipfile.ZipFile(caminho, "w") as zip_:
 
@@ -407,21 +411,46 @@ def _paginar(servico: _Servico, url: str, pasta: Path, sigla: str, pausa: float,
                                    f"{_formatar(tamanho)} registros; o limite é {MAX_PAGINAS}.")
 
             # As demais em paralelo, gravadas na ordem das faixas: só `paralelo` páginas na memória por vez.
+            proximas = iter(faixas)
+            restantes: list[tuple[int, int]] = []
             with ThreadPoolExecutor(max_workers=paralelo, thread_name_prefix="coleta") as pool:
-                proximas = iter(faixas)
-                pendentes = deque()
+                pendentes: deque = deque()
 
                 def pedir_proxima() -> None:
                     faixa = next(proximas, None)
                     if faixa:
-                        pendentes.append(pool.submit(_baixar_faixa, servico, *faixa, pausa))
+                        pendentes.append((faixa, pool.submit(_baixar_faixa, servico, *faixa, pausa)))
 
                 for _ in range(paralelo):
                     pedir_proxima()
                 while pendentes:
-                    partes = pendentes.popleft().result()
+                    faixa, futuro = pendentes.popleft()
+                    if paralelo == 1:
+                        gravar(futuro.result())
+                        pedir_proxima()
+                        continue
+                    try:
+                        partes = futuro.result()
+                        motivo = None if _registros(partes) == faixa[1] else "veio incompleta"
+                    except ColetaFalhou as e:
+                        motivo = str(e)
+                    if motivo:
+                        # O servidor não aguentou os pedidos em paralelo: daqui em diante, um por vez.
+                        # As faixas já pedidas são refeitas (o resultado delas é descartado).
+                        restantes = [faixa, *(f for f, _ in pendentes)]
+                        for _, outro in pendentes:
+                            outro.cancel()
+                        log.warning("Faixa a partir do registro %d com %d pedidos ao mesmo tempo: %s. "
+                                    "Seguindo uma página por vez.", faixa[0], paralelo, motivo)
+                        avisos.append("O servidor falhou com pedidos em paralelo; a coleta seguiu uma "
+                                      "página por vez.")
+                        progresso(f"Coletando: {_formatar(coletados)} de {_formatar(total)} registros; o servidor "
+                                  "falhou com pedidos em paralelo, seguindo uma página por vez.")
+                        break
                     pedir_proxima()
                     gravar(partes)
+            for faixa in [*restantes, *(proximas if restantes else ())]:
+                gravar(_baixar_faixa(servico, *faixa, pausa))
 
         if repetidos:
             raise ColetaFalhou(f"{_formatar(repetidos)} registros vieram repetidos entre as páginas: a ordem do "
@@ -446,7 +475,12 @@ def _paginar(servico: _Servico, url: str, pasta: Path, sigla: str, pausa: float,
              paralelo, coletados / segundos if segundos else 0)
     return Resultado(caminho=caminho, nome=nome, content_type="application/zip",
                      tamanho=tamanho_zip, hash_sha256=_hash(caminho), tipo=servico.tipo,
-                     total=total, coletados=coletados, paginas=paginas, segundos=segundos)
+                     total=total, coletados=coletados, paginas=paginas, segundos=segundos,
+                     avisos=avisos)
+
+
+def _registros(partes: list[tuple[bytes, list]]) -> int:
+    return sum(len(feicoes) for _, feicoes in partes)
 
 
 def _baixar_faixa(servico: _Servico, inicio: int, tamanho: int, pausa: float) -> list[tuple[bytes, list]]:

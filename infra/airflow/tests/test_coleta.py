@@ -258,3 +258,52 @@ def test_pagina_vazia_no_meio_e_pedida_de_novo(tmp_path):
 
     assert _ids(r.caminho) == [str(i) for i in range(8000)]
     assert r.paginas == 4
+
+
+class NaoAguentaParalelo(ServidorFalso):
+    """Responde HTTP 200 vazio sempre que há mais de um pedido de página aberto ao mesmo tempo."""
+
+    def __init__(self, total: int):
+        super().__init__(total)
+        self.trava = threading.Lock()
+        self.abertos = 0
+
+    def texto(self, url: str) -> bytes:
+        if "resultOffset" not in url:
+            return super().texto(url)
+        with self.trava:
+            self.abertos += 1
+            sobrecarga = self.abertos > 1
+        try:
+            time.sleep(0.02)
+            if sobrecarga:
+                return json.dumps({"type": "FeatureCollection", "features": []}).encode()
+            return super().texto(url)
+        finally:
+            with self.trava:
+                self.abertos -= 1
+
+
+def test_servidor_que_nao_aguenta_paralelo_segue_uma_pagina_por_vez(tmp_path):
+    (tmp_path / "1").mkdir()
+    (tmp_path / "4").mkdir()
+    um = coleta.coletar(ARCGIS, tmp_path / "1", "F", cliente=ServidorFalso(total=12000), pausa=0, paralelo=1)
+
+    r = coleta.coletar(ARCGIS, tmp_path / "4", "F", cliente=NaoAguentaParalelo(total=12000), pausa=0, paralelo=4)
+
+    assert _ids(r.caminho) == [str(i) for i in range(12000)]
+    assert r.hash_sha256 == um.hash_sha256  # as faixas refeitas uma por vez dão o mesmo zip
+    assert r.avisos == ["O servidor falhou com pedidos em paralelo; a coleta seguiu uma página por vez."]
+    assert r.mensagem().endswith("a coleta seguiu uma página por vez.")
+    assert not um.avisos
+
+
+def test_falha_se_nem_uma_pagina_por_vez_funciona(tmp_path):
+    class SempreFalhaEm4000(ServidorFalso):
+        def texto(self, url):
+            if "resultOffset=4000" in url:
+                raise coleta._ErroDoServidor("HTTP 500")
+            return super().texto(url)
+
+    with pytest.raises(coleta.ColetaFalhou, match="mesmo com páginas de 50 registros"):
+        coleta.coletar(ARCGIS, tmp_path, "F", cliente=SempreFalhaEm4000(total=8000), pausa=0, paralelo=4)

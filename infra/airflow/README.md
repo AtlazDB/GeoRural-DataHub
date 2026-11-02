@@ -68,7 +68,9 @@ docker compose -f docker-compose.local.yaml --env-file .env.local run --rm \
   poligonos da Reserva Legal do IAT, 30 s com 1 pedido e 16 s com 4.
 * Faltou registro ou veio repetido entre paginas: a coleta **falha** ("vieram X de Y") em vez de
   gravar dado pela metade. HTTP 500 ou demora na pagina: ela e dividida pela metade (ate 50). Pagina
-  vazia no meio da fonte (o ArcGIS do IAT faz isso sob carga, com HTTP 200) e pedida de novo.
+  vazia no meio da fonte (o ArcGIS do IAT faz isso sob carga, com HTTP 200) e pedida de novo. Se
+  uma faixa falhar ou vier incompleta com pedidos em paralelo, a coleta segue **uma pagina por vez**
+  daquela faixa em diante (a mensagem da fonte avisa) e so falha se nem assim o servidor entregar.
 * O log da coleta e a mensagem da fonte trazem a duracao; o resumo do processamento traz os
   segundos de cada etapa (`tempos`: leitura, staging, validacao, tratada, quarentena, conclusao,
   indicadores).
