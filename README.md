@@ -37,8 +37,9 @@ Desenvolvimento do **GeoRural DataHub**, uma plataforma web com **Spring Boot** 
 |   US08   |    Alta    | Como Analista, quero consultar os indicadores de Reserva Legal e de focos de calor de cada imóvel rural para que eu possa avaliar sua conformidade ambiental. |    5     |   2    |  Concluído ✅   |
 |   US09   |   Média    | Como Auditor, quero consultar o histórico das versões dos dados indicadores e sua origem para que eu possa verificar como os resultados foram produzidos e comparar diferentes versões. |    8     |   3    |  Concluído ✅   |
 |   US10   |   Média    | Como Gestor, quero controlar o acesso às funcionalidades da aplicação de acordo com o perfil de cada usuário para que informações e operações importantes sejam protegidas contra acessos não autorizados. |    5     |   3    |  Planejada 📅   |
-|   US11   |   Média    | Como Analista, quero consultar os demais indicadores ambientais de cada imóvel rural (cobertura vegetal, APP, áreas protegidas, embargos e desmatamento) em mapa, gráficos e tabelas para que eu possa avaliar sua situação e seus riscos ambientais. |    8     |   3    |  Planejada 📅   |
+|   US11   |   Média    | Como Analista, quero consultar os demais indicadores ambientais de cada imóvel rural (cobertura vegetal, APP, áreas protegidas, embargos e desmatamento) em mapa, gráficos e tabelas para que eu possa avaliar sua situação e seus riscos ambientais. |    8     |   3    |  Em andamento 🚧   |
 |   US12   |   Baixa    | Como Analista, quero visualizar os indicadores agregados por município e exportá-los por download e por meio de uma API para que eu possa analisar as regiões e utilizar os resultados em outros sistemas. |    8     |   3    |  Planejada 📅   |
+|   US13   |   Média    | Como Analista, quero cadastrar novos indicadores ambientais, informando a fonte, o modelo de cálculo e as faixas de status, para que eu possa avaliar os imóveis rurais com novos critérios sem depender de alterações no sistema. |    8     |   3    |  Em andamento 🚧   |
 
 
 ---
@@ -49,7 +50,7 @@ Desenvolvimento do **GeoRural DataHub**, uma plataforma web com **Spring Boot** 
 | :----------: | :----: | :-----: | :----------: | :----: | :----: |
 | 🔖 Sprint 1 | 07/09  | 27/09 |   [Sprint 1](./Documentacao/Processo/Sprints/Sprint1/README.md)             |   [`vídeo disponível`](https://youtu.be/QcErlgeITU0)          |  Concluído ✅    |
 | 🔖 Sprint 2 | 05/10  | 25/10 |   [Sprint 2](./Documentacao/Processo/Sprints/Sprint2/README.md)             |   [`vídeo disponível`](https://youtu.be/OA_OV9PeG_U)            |  Concluído ✅    |
-| 🔖 Sprint 3 | 02/11  | 22/11 |   [Sprint 3](./Documentacao/Processo/Sprints/Sprint3/README.md)             |   -            |  Planejada 📅    |
+| 🔖 Sprint 3 | 02/11  | 22/11 |   [Sprint 3](./Documentacao/Processo/Sprints/Sprint3/README.md)             |   -            |  Em andamento 🚧    |
 
 ---
 ## 💻 Tecnologias <a id="tecnologias"></a>
