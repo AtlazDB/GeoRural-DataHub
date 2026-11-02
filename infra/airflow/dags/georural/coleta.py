@@ -11,6 +11,12 @@ coleta pergunta o total (returnCountOnly / resultType=hits) e, no fim, confere: 
 bate com o total, ou se algum registro veio repetido, a coleta falha ("vieram X de Y") em vez de
 gravar dado pela metade como se estivesse completo.
 
+As páginas são pedidas em paralelo. A primeira vai sozinha: é ela que diz quantos registros o
+servidor entrega de verdade por pedido. Com o total e esse tamanho, as demais viram faixas fixas
+(deslocamento, tamanho), baixadas por até PARALELO pedidos ao mesmo tempo e gravadas no zip na
+ordem dos deslocamentos, não na de chegada: o zip sai igual com 1 ou com N pedidos, e o hash
+continua dizendo se a fonte mudou. Só PARALELO páginas ficam na memória por vez.
+
 Cada página entra num zip já comprimida (parte-0001.geojson, parte-0002.geojson, ...), assim que
 chega: o GeoJSON cru nunca fica inteiro em disco nem na memória. O zip é determinístico (data fixa
 nas entradas, compressão fixa): o mesmo conteúdo gera o mesmo arquivo, e o hash diz se a fonte
@@ -19,8 +25,9 @@ mudou desde a última coleta.
 Um link que não é serviço (zip, CSV, GeoJSON para baixar) é baixado de uma vez, conferindo o
 tamanho anunciado pelo servidor.
 
-Proteções da paginação: tamanho de página que cai pela metade quando o servidor dá erro 5xx (até
-50), trava de páginas e remoção dos parâmetros de paginação que já vierem no link.
+Proteções da paginação: página que cai pela metade quando o servidor dá erro 5xx (até 50; na
+primeira página o tamanho menor vale para todas, nas demais só a faixa que falhou é dividida),
+trava de páginas e remoção dos parâmetros de paginação que já vierem no link.
 """
 
 import hashlib
@@ -28,10 +35,14 @@ import ipaddress
 import json
 import logging
 import re
+import os
 import socket
 import ssl
+import threading
 import time
 import zipfile
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -53,7 +64,10 @@ PAGINA_WFS = 5000
 PAGINA_ARCGIS = 2000
 MAX_PAGINAS = 1000
 TENTATIVAS = 3
-PAUSA_ENTRE_PAGINAS = 0.5  # segundos: o IAT e o SICAR são serviços públicos, sem pressa
+PAUSA_ENTRE_PAGINAS = 0.5  # segundos, a cada pedido: o IAT e o SICAR são serviços públicos
+# Páginas pedidas ao mesmo tempo. O WFS do SICAR fica com menos: uma página do CAR passa de 100 MB
+# na memória. GEORURAL_COLETA_PARALELO troca os dois (1 = uma página por vez, como antes).
+PARALELO = {"ARCGIS": 4, "WFS": 2}
 TEMPO_LIMITE = (15, 120)  # conexão, leitura (segundos): página que demora mais que isso é dividida
 LIMITE_ARQUIVO = 2 * 1024**3  # o mesmo app.coleta.limite-bytes do back-end
 MAX_REDIRECIONAMENTOS = 5
@@ -88,16 +102,23 @@ class Resultado:
     total: int | None = None
     coletados: int | None = None
     paginas: int = 0
+    segundos: float | None = None
     avisos: list[str] = field(default_factory=list)
 
     def mensagem(self) -> str:
         if self.coletados is None:
             return f"Arquivo baixado ({_formatar(self.tamanho)} bytes)."
-        return f"{_formatar(self.coletados)} registros coletados em {self.paginas} página(s)."
+        duracao = f" em {_duracao(self.segundos)}" if self.segundos is not None else ""
+        return f"{_formatar(self.coletados)} registros coletados em {self.paginas} página(s){duracao}."
 
 
 def _formatar(numero: int) -> str:
     return f"{numero:,}".replace(",", ".")
+
+
+def _duracao(segundos: float) -> str:
+    minutos, resto = divmod(int(round(segundos)), 60)
+    return f"{minutos} min {resto} s" if minutos else f"{resto} s"
 
 
 # ------------------------------------------------------------------ link
@@ -161,14 +182,25 @@ class _AdaptadorTls(HTTPAdapter):
 
 
 class ClienteHttp:
-    """GET com novas tentativas e conferência de cada redirecionamento. Os testes trocam por um falso."""
+    """GET com novas tentativas e conferência de cada redirecionamento. Os testes trocam por um falso.
+
+    Uma sessão por thread: a requests.Session não é segura entre threads, e as páginas são pedidas
+    em paralelo."""
 
     def __init__(self, cabecalhos: dict | None = None, validar: Callable[[str], None] = validar_url):
-        self.sessao = requests.Session()
-        self.sessao.mount("https://", _AdaptadorTls())
-        self.sessao.headers.update({"User-Agent": "GeoRural-DataHub/1.0 (coleta)"})
-        self.sessao.headers.update(cabecalhos or {})
+        self.cabecalhos = {"User-Agent": "GeoRural-DataHub/1.0 (coleta)", **(cabecalhos or {})}
         self.validar = validar
+        self._local = threading.local()
+
+    @property
+    def sessao(self) -> requests.Session:
+        sessao = getattr(self._local, "sessao", None)
+        if sessao is None:
+            sessao = requests.Session()
+            sessao.mount("https://", _AdaptadorTls())
+            sessao.headers.update(self.cabecalhos)
+            self._local.sessao = sessao
+        return sessao
 
     def abrir(self, url: str, metodo: str = "GET", corpo: str | None = None, stream: bool = False):
         for _ in range(MAX_REDIRECIONAMENTOS + 1):
@@ -183,8 +215,8 @@ class ClienteHttp:
         raise ColetaFalhou("O link redirecionou vezes demais.")
 
     def texto(self, url: str) -> bytes:
-        """Corpo de um GET. HTTP 500 e tempo esgotado saem na hora (quem chama divide a
-        página); erro passageiro (429, 502, 503, 504, conexão caída) ganha até TENTATIVAS novas
+        """Corpo de um GET. HTTP 500 e tempo esgotado saem na hora (quem chama divide a página); erro
+        passageiro (429, 502, 503, 504, conexão caída) ganha até TENTATIVAS novas
         tentativas."""
         espera = 2
         for tentativa in range(1, TENTATIVAS + 1):
@@ -299,6 +331,7 @@ class _WFS(_Servico):
 def coletar(url: str, pasta: Path, sigla: str, *, chaves: list[str] | None = None,
             metodo: str = "GET", cabecalhos: dict | None = None, corpo: str | None = None,
             cliente: ClienteHttp | None = None, pausa: float = PAUSA_ENTRE_PAGINAS,
+            paralelo: int | None = None,
             progresso: Callable[[str], None] = lambda _: None) -> Resultado:
     """Coleta o link inteiro em `pasta`. Serviço vira um zip de páginas; arquivo é baixado como veio."""
     cliente = cliente or ClienteHttp(cabecalhos)
@@ -306,11 +339,17 @@ def coletar(url: str, pasta: Path, sigla: str, *, chaves: list[str] | None = Non
     if tipo_link == TIPO_ARQUIVO:
         return _baixar_arquivo(url, pasta, sigla, cliente, metodo, corpo)
     servico = _ArcGIS(url, cliente) if tipo_link == TIPO_ARCGIS else _WFS(url, cliente, chaves or [])
-    return _paginar(servico, url, pasta, sigla, pausa, progresso)
+    return _paginar(servico, url, pasta, sigla, pausa, progresso, paralelo or _paralelo(servico.tipo))
+
+
+def _paralelo(tipo_servico: str) -> int:
+    valor = os.environ.get("GEORURAL_COLETA_PARALELO", "").strip()
+    return max(1, int(valor)) if valor else PARALELO[tipo_servico]
 
 
 def _paginar(servico: _Servico, url: str, pasta: Path, sigla: str, pausa: float,
-             progresso: Callable[[str], None]) -> Resultado:
+             progresso: Callable[[str], None], paralelo: int) -> Resultado:
+    relogio = time.monotonic()
     total = servico.total()
     if total == 0:
         raise ColetaFalhou("O serviço respondeu que não há nenhum registro para este link.")
@@ -318,44 +357,70 @@ def _paginar(servico: _Servico, url: str, pasta: Path, sigla: str, pausa: float,
 
     nome = f"{sigla.lower()}.zip"
     caminho = pasta / nome
-    tamanho = servico.pagina_inicial
     coletados = paginas = repetidos = 0
     vistos: set = set()
 
     with zipfile.ZipFile(caminho, "w") as zip_:
-        while coletados < total:
-            if paginas >= MAX_PAGINAS:
-                raise ColetaFalhou(f"A coleta passou de {MAX_PAGINAS} páginas e foi interrompida "
-                                   f"({_formatar(coletados)} de {_formatar(total)} registros).")
+
+        def gravar(partes: list[tuple[bytes, list]]) -> None:
+            nonlocal coletados, paginas, repetidos
+            for conteudo, feicoes in partes:
+                if paginas >= MAX_PAGINAS:
+                    raise ColetaFalhou(f"A coleta passou de {MAX_PAGINAS} páginas e foi interrompida "
+                                       f"({_formatar(coletados)} de {_formatar(total)} registros).")
+                for feicao in feicoes:
+                    identificador = feicao.get("id")
+                    if identificador is not None:
+                        if identificador in vistos:
+                            repetidos += 1
+                        vistos.add(identificador)
+                paginas += 1
+                _gravar_entrada(zip_, f"parte-{paginas:04d}.geojson", conteudo)
+                coletados += len(feicoes)
+            progresso(f"Coletando: {_formatar(coletados)} de {_formatar(total)} registros "
+                      f"({paginas} página(s)).")
+
+        # 1ª página sozinha: diz quantos registros o servidor entrega de verdade por pedido.
+        tamanho = servico.pagina_inicial
+        while True:
             try:
-                conteudo = servico.cliente.texto(servico.pagina(coletados, tamanho))
+                conteudo = servico.cliente.texto(servico.pagina(0, tamanho))
+                break
             except _ErroDoServidor as e:
                 if tamanho <= PAGINA_MINIMA:
                     raise ColetaFalhou(f"O servidor de origem falhou mesmo com páginas de {PAGINA_MINIMA} "
-                                       f"registros ({e}). Vieram {_formatar(coletados)} de {_formatar(total)}.") from e
+                                       f"registros ({e}). Vieram 0 de {_formatar(total)}.") from e
                 tamanho = max(PAGINA_MINIMA, tamanho // 2)
                 log.warning("Página com erro (%s): tentando com %d registros por pedido", e, tamanho)
-                continue
+        primeira = _feicoes(conteudo)
+        time.sleep(pausa)
 
-            feicoes = _feicoes(conteudo)
-            if not feicoes:
-                break
-            for feicao in feicoes:
-                identificador = feicao.get("id")
-                if identificador is not None:
-                    if identificador in vistos:
-                        repetidos += 1
-                    vistos.add(identificador)
+        if primeira:
+            gravar([(conteudo, primeira)])
+            # O servidor pode entregar menos do que o pedido (o próprio limite dele): as faixas usam esse tamanho.
+            if coletados < total:
+                tamanho = min(tamanho, len(primeira))
+            faixas = [(inicio, min(tamanho, total - inicio)) for inicio in range(coletados, total, tamanho)]
+            if paginas + len(faixas) > MAX_PAGINAS:
+                raise ColetaFalhou(f"A coleta precisaria de {paginas + len(faixas)} páginas de "
+                                   f"{_formatar(tamanho)} registros; o limite é {MAX_PAGINAS}.")
 
-            paginas += 1
-            _gravar_entrada(zip_, f"parte-{paginas:04d}.geojson", conteudo)
-            coletados += len(feicoes)
-            # O servidor pode entregar menos do que o pedido (o próprio limite dele): a próxima
-            # página já pede esse tamanho.
-            tamanho = min(tamanho, len(feicoes)) if coletados < total else tamanho
-            progresso(f"Coletando: {_formatar(coletados)} de {_formatar(total)} registros "
-                      f"({paginas} página(s)).")
-            time.sleep(pausa)
+            # As demais em paralelo, gravadas na ordem das faixas: só `paralelo` páginas na memória por vez.
+            with ThreadPoolExecutor(max_workers=paralelo, thread_name_prefix="coleta") as pool:
+                proximas = iter(faixas)
+                pendentes = deque()
+
+                def pedir_proxima() -> None:
+                    faixa = next(proximas, None)
+                    if faixa:
+                        pendentes.append(pool.submit(_baixar_faixa, servico, *faixa, pausa))
+
+                for _ in range(paralelo):
+                    pedir_proxima()
+                while pendentes:
+                    partes = pendentes.popleft().result()
+                    pedir_proxima()
+                    gravar(partes)
 
         if repetidos:
             raise ColetaFalhou(f"{_formatar(repetidos)} registros vieram repetidos entre as páginas: a ordem do "
@@ -373,9 +438,48 @@ def _paginar(servico: _Servico, url: str, pasta: Path, sigla: str, pausa: float,
             "total": total, "paginas": paginas,
         }, ensure_ascii=False, indent=2).encode("utf-8"))
 
+    segundos = time.monotonic() - relogio
+    tamanho_zip = caminho.stat().st_size
+    log.info("Coleta %s: %s registros em %d página(s), %.1f MB, %.1f s (%d pedidos ao mesmo tempo, "
+             "%.0f registros/s)", sigla, _formatar(coletados), paginas, tamanho_zip / 1e6, segundos,
+             paralelo, coletados / segundos if segundos else 0)
     return Resultado(caminho=caminho, nome=nome, content_type="application/zip",
-                     tamanho=caminho.stat().st_size, hash_sha256=_hash(caminho), tipo=servico.tipo,
-                     total=total, coletados=coletados, paginas=paginas)
+                     tamanho=tamanho_zip, hash_sha256=_hash(caminho), tipo=servico.tipo,
+                     total=total, coletados=coletados, paginas=paginas, segundos=segundos)
+
+
+def _baixar_faixa(servico: _Servico, inicio: int, tamanho: int, pausa: float) -> list[tuple[bytes, list]]:
+    """Baixa uma faixa (numa thread do pool) e devolve as páginas dela, em ordem.
+
+    Erro 5xx ou tempo esgotado: a faixa é dividida em duas metades, até PAGINA_MINIMA. Página
+    vazia no meio da fonte é pedida de novo, com espera (até TENTATIVAS vezes): com vários
+    pedidos ao mesmo tempo, o ArcGIS do IAT às vezes responde HTTP 200 sem nenhuma feição. Se
+    continuar vazia, a faixa acaba ali, e a conferência do total no fim diz o que faltou. Se o
+    servidor entregar menos do que o pedido, o resto da faixa é pedido de novo."""
+    for tentativa in range(1, TENTATIVAS + 1):
+        try:
+            conteudo = servico.cliente.texto(servico.pagina(inicio, tamanho))
+        except _ErroDoServidor as e:
+            if tamanho <= PAGINA_MINIMA:
+                raise ColetaFalhou(f"O servidor de origem falhou mesmo com páginas de {PAGINA_MINIMA} registros "
+                                   f"({e}), a partir do registro {_formatar(inicio)}.") from e
+            metade = max(PAGINA_MINIMA, tamanho // 2)
+            log.warning("Página com erro (%s): dividindo %d registros a partir de %d", e, tamanho, inicio)
+            return (_baixar_faixa(servico, inicio, metade, pausa)
+                    + _baixar_faixa(servico, inicio + metade, tamanho - metade, pausa))
+        time.sleep(pausa)
+        feicoes = _feicoes(conteudo)
+        if feicoes:
+            break
+        if tentativa < TENTATIVAS:
+            log.warning("Página vazia a partir do registro %d: pedindo de novo (%d/%d)", inicio, tentativa, TENTATIVAS)
+            time.sleep(pausa * 4 * tentativa)
+    else:
+        return []
+    partes = [(conteudo, feicoes)]
+    if len(feicoes) < tamanho:
+        partes += _baixar_faixa(servico, inicio + len(feicoes), tamanho - len(feicoes), pausa)
+    return partes
 
 
 def _feicoes(conteudo: bytes) -> list[dict]:
