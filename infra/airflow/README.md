@@ -50,7 +50,8 @@ docker compose -f docker-compose.local.yaml --env-file .env.local run --rm \
                                                          ▼
                                                    coletar_fonte (uma por vez)
                                                      pergunta o total, pagina o servico
-                                                     (ArcGIS ou WFS) em ordem fixa, confere
+                                                     (ArcGIS ou WFS) em ordem fixa, varias
+                                                     paginas ao mesmo tempo, confere
                                                      coletado = total, zip de paginas GeoJSON
                                                          │ mesmo hash da ultima? "sem mudanca"
                                                          ▼
@@ -59,8 +60,17 @@ docker compose -f docker-compose.local.yaml --env-file .env.local run --rm \
 
 * `georural/coleta.py`. Pagina ArcGIS por `resultOffset`/`resultRecordCount` ordenado pelo
   objectid, e WFS por `startIndex`/`count` ordenado pela coluna-chave do mapeamento.
+* Paginas em paralelo: a 1a vai sozinha (diz quantos registros o servidor entrega por pedido); as
+  demais viram faixas fixas, ate 4 ao mesmo tempo no ArcGIS e 2 no WFS (`GEORURAL_COLETA_PARALELO`
+  troca; 1 = uma por vez). O zip e gravado na ordem das faixas: sai igual com 1 ou com N pedidos, e o
+  hash do "sem mudanca" continua valendo. No recorte de 20 mil poligonos da Reserva Legal do IAT,
+  30 s com 1 pedido e 16 s com 4.
 * Faltou registro ou veio repetido entre paginas: a coleta **falha** ("vieram X de Y") em vez de
-  gravar dado pela metade. HTTP 500 ou demora na pagina: ela e dividida pela metade (ate 50).
+  gravar dado pela metade. HTTP 500 ou demora na pagina: ela e dividida pela metade (ate 50). Pagina
+  vazia no meio da fonte (o ArcGIS do IAT faz isso sob carga, com HTTP 200) e pedida de novo.
+* O log da coleta e a mensagem da fonte trazem a duracao; o resumo do processamento traz os
+  segundos de cada etapa (`tempos`: leitura, staging, validacao, tratada, quarentena, conclusao,
+  indicadores).
 * O andamento e o resultado aparecem na tela da fonte (`fonte.ultima_coleta_mensagem`).
 
 ### Como o processamento funciona
