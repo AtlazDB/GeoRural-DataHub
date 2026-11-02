@@ -109,7 +109,7 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
 
         plano = _planejar(cols, valores_desempate) if cols else {}
         del valores_desempate
-        resumo.conjunto = gravacao.CONJUNTO_DA_TABELA.get(mapa.tabela, mapa.tabela)
+        resumo.conjunto = gravacao.conjunto_da_carga(mapa.tabela, arquivo.sigla_fonte)
         entidade = mapa.tabela if len(mapa.tabelas) == 1 else None
 
         try:
