@@ -350,8 +350,9 @@ card **Importar arquivo** e, abaixo dele, os **Arquivos recebidos** da fonte sel
    selecionar", ou clique nela, e depois em **Iniciar importação**. Para escolher outro arquivo,
    use **Trocar arquivo**. A barra mostra o progresso do envio e, em seguida, "Processando no
    servidor…".
-3. **Processamento automático:** arquivos `.zip`, `.geojson` e `.json` entram na fila do Airflow
-   assim que o envio termina ("Na fila do Airflow: o processamento começa em até 2 minutos").
+3. **Processamento automático:** arquivos `.zip`, `.geojson` e `.json` são enviados ao Airflow assim
+   que o envio termina. Se o Airflow estiver fora do ar, a tela avisa, o arquivo fica como Recebido e
+   basta clicar em **Processar** depois.
 4. **Acompanhar o status** na lista **Arquivos recebidos**: Recebido, Processando, Processado,
    Rejeitado ou Aguardando mapeamento. Enquanto houver arquivo processando, a lista se atualiza
    sozinha a cada poucos segundos.
@@ -384,9 +385,8 @@ pelo seed (veja [Primeira carga de dados](#primeira-carga-de-dados)). Para cadas
 fonte. O arquivo baixado aparece em **Arquivos recebidos** como um envio comum e é processado em
 seguida. Se o conteúdo for igual ao da última coleta, aparece "Sem mudança" e nada é gravado.
 
-- **Sem o Airflow**, o download é feito na hora, numa única requisição.
-- **Com o Airflow**, o pedido entra numa fila verificada a cada 2 minutos. Enquanto a coleta roda,
-  o botão fica girando e a mensagem de andamento aparece embaixo da fonte. Serviços ArcGIS e WFS
+- O botão dispara a coleta no Airflow na hora; se ele estiver fora do ar, a tela avisa e é só tentar
+  de novo. Enquanto a coleta roda, o botão fica girando e a mensagem de andamento aparece embaixo da fonte. Serviços ArcGIS e WFS
   são lidos em páginas; se faltar ou repetir algum registro, a coleta falha ("vieram X de Y") em
   vez de gravar dado pela metade.
 

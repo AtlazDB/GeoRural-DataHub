@@ -1,9 +1,8 @@
-"""O lado do banco da coleta por link: pedidos na fila, andamento e o arquivo gravado na zona bruta.
+"""O lado do banco da coleta por link: pedidos, andamento e o arquivo gravado na zona bruta.
 
-O "Executar" da tela (back-end) só marca fonte.coleta_solicitada_em. O
-coleta_fontes reserva esses pedidos e dispara o coletar_fonte, que vai escrevendo o andamento em
-fonte.ultima_coleta_mensagem e, no fim, grava o arquivo_bruto RECEBIDO (origem COLETA), que o
-varredor_bruta pega como qualquer upload.
+O "Executar" da tela (back-end) marca fonte.coleta_solicitada_em e dispara o coletar_fonte, que
+reserva o pedido, vai escrevendo o andamento em fonte.ultima_coleta_mensagem e, no fim, grava o
+arquivo_bruto (origem COLETA) e dispara o processar_arquivo, como num upload.
 
 A tela mostra "coletando" enquanto houver pedido na fila ou uma mensagem sem ultima_coleta_em.
 """
@@ -28,22 +27,8 @@ class FontePorLink:
     corpo: str | None
 
 
-def listar_pedidos(con, limite: int) -> list[int]:
-    with con.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id FROM fonte
-             WHERE coleta_solicitada_em IS NOT NULL AND url_origem IS NOT NULL
-             ORDER BY coleta_solicitada_em
-             FETCH FIRST :limite ROWS ONLY
-            """,
-            limite=limite,
-        )
-        return [linha[0] for linha in cur.fetchall()]
-
-
 def reservar(con, fonte_id: int) -> bool:
-    """Tira o pedido da fila e marca "coletando". Devolve False se outro varredor pegou antes."""
+    """Tira o pedido da fila e marca "coletando". Devolve False se outra execução já atendeu o pedido."""
     with con.cursor() as cur:
         cur.execute(
             """

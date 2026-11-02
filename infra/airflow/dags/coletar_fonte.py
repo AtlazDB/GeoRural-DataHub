@@ -7,13 +7,13 @@ Coleta o link de uma fonte inteiro e grava o resultado na zona bruta, como um up
 * arquivo (zip, CSV, GeoJSON): baixado de uma vez
 
 No fim, se o conteúdo for igual ao da última coleta (mesmo hash), nada é gravado ("sem mudança").
-Senão, o zip vai para `bruta/<SIGLA>/<data>/...` e nasce um `arquivo_bruto` RECEBIDO (origem
-COLETA), que o `varredor_bruta` manda processar. O andamento e o resultado aparecem na tela da
-fonte (`fonte.ultima_coleta_mensagem`).
+Senão, o zip vai para `bruta/<SIGLA>/<data>/...`, nasce um `arquivo_bruto` (origem COLETA) e esta
+DAG dispara o `processar_arquivo`. O andamento e o resultado aparecem na tela da fonte
+(`fonte.ultima_coleta_mensagem`).
 
 **Como é disparada**
-* pelo `coleta_fontes`: `{"fonte_id": 7}`
-* à mão, pela interface do Airflow (*Trigger DAG w/ config*), com o mesmo `{"fonte_id": 7}`
+* pelo "Executar" da tela: o back-end chama a API REST do Airflow com `{"fonte_id": 7, "pedido": true}`
+* à mão, pela interface do Airflow (*Trigger DAG w/ config*): `{"fonte_id": 7}`
 
 Uma coleta por vez (`max_active_runs=1`): os serviços públicos de origem agradecem.
 """
@@ -23,9 +23,10 @@ from datetime import timedelta
 from pathlib import Path
 
 import pendulum
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import Param, dag, get_current_context, task
 
-from georural import bucket, coleta, config, fontes
+from georural import bucket, coleta, config, fontes, gravacao
 from georural.banco import conectar
 
 
@@ -42,9 +43,13 @@ def _registrar_falha(context) -> None:
     start_date=pendulum.datetime(2026, 10, 1, tz="America/Sao_Paulo"),
     catchup=False,
     max_active_runs=1,
+    is_paused_upon_creation=False,  # sem agendamento: só roda quando um botão dispara
     tags=["georural", "coleta"],
     doc_md=__doc__,
-    params={"fonte_id": Param(None, type=["null", "integer"], description="id em fonte")},
+    params={
+        "fonte_id": Param(None, type=["null", "integer"], description="id em fonte"),
+        "pedido": Param(False, type="boolean", description="true quando veio do Executar da tela"),
+    },
 )
 def coletar_fonte():
 
@@ -57,6 +62,9 @@ def coletar_fonte():
         cfg = config.carregar()
 
         with conectar(cfg) as con, tempfile.TemporaryDirectory(prefix="coleta-") as pasta:
+            # Dois cliques no Executar disparam duas execuções: a segunda não acha mais o pedido.
+            if params.get("pedido") and not fontes.reservar(con, fonte_id):
+                return {"resultado": "JA_ATENDIDO"}
             fonte = fontes.buscar(con, fonte_id)
             resultado = coleta.coletar(
                 fonte.url, Path(pasta), fonte.sigla,
@@ -80,7 +88,24 @@ def coletar_fonte():
             return {"resultado": "RECEBIDO", "arquivo_bruto_id": arquivo_id, "total": resultado.total,
                     "coletados": resultado.coletados, "paginas": resultado.paginas, "bytes": resultado.tamanho}
 
-    coletar()
+    @task
+    def reservar_arquivo(resultado: dict) -> list[dict]:
+        """Coleta que gravou arquivo novo: reserva e manda processar (sem arquivo, a tarefa de disparo é pulada)."""
+        if resultado["resultado"] != "RECEBIDO":
+            return []
+        arquivo_id = resultado["arquivo_bruto_id"]
+        with conectar(config.carregar()) as con:
+            if not gravacao.buscar_arquivo(con, arquivo_id).processavel or not gravacao.reservar(con, arquivo_id):
+                return []
+        agora = pendulum.now("UTC").format("YYYYMMDDHHmmss")
+        return [{"trigger_run_id": f"arquivo-{arquivo_id}-{agora}",
+                 "conf": {"arquivo_bruto_id": arquivo_id, "reservado": True}}]
+
+    TriggerDagRunOperator.partial(
+        task_id="disparar_processamento",
+        trigger_dag_id="processar_arquivo",
+        wait_for_completion=False,
+    ).expand_kwargs(reservar_arquivo(coletar()))
 
 
 coletar_fonte()

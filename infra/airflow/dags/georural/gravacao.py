@@ -104,26 +104,6 @@ def buscar_arquivo(con, arquivo_id: int) -> Arquivo | None:
     return Arquivo(*linha) if linha else None
 
 
-def listar_recebidos(con, limite: int) -> list[int]:
-    """Arquivos que chegaram na zona bruta (upload ou coleta) e ainda não foram processados, de
-    qualquer fonte, nos formatos que o processamento lê."""
-    with con.cursor() as cur:
-        cur.execute(
-            """
-            SELECT a.id
-              FROM arquivo_bruto a
-             WHERE a.status = 'RECEBIDO'
-               AND (LOWER(a.nome_original) LIKE '%.zip'
-                    OR LOWER(a.nome_original) LIKE '%.geojson'
-                    OR LOWER(a.nome_original) LIKE '%.json')
-             ORDER BY a.recebido_em
-             FETCH FIRST :limite ROWS ONLY
-            """,
-            limite=limite,
-        )
-        return [linha[0] for linha in cur.fetchall()]
-
-
 def reservar(con, arquivo_id: int, somente_recebido: bool = True) -> bool:
     """Passa o arquivo para PROCESSANDO. Devolve False se outro processo pegou antes.
 
