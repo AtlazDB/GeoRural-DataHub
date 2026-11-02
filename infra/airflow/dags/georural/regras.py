@@ -21,11 +21,14 @@ motor que valida ser o mesmo que calcula. Os vértices repetidos a menos de 6 cm
 recusa até em consulta, já saem na leitura (leitura.wkb).
 """
 
+import os
 import re
+import tempfile
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import numpy as np
 import oracledb
@@ -506,8 +509,9 @@ def carregar_regras(con, fonte_id: int) -> list[Regra]:
                       ordem=int(r[14]) if r[14] is not None else None) for r in cur]
 
 
-def carregar_contexto(con, regras: list[Regra]) -> Contexto:
-    """Só carrega o que alguma regra usa."""
+def carregar_contexto(con, regras: list[Regra], linha: dict | None = None) -> Contexto:
+    """Só carrega o que alguma regra usa. Com `linha` (o texto das colunas de um registro, no
+    "Revalidar"), as referências olham só os valores dele, e não a tabela inteira."""
     ctx = Contexto()
     with con.cursor() as cur:
         dominios = sorted({r.dominio_id for r in regras if r.dominio_id is not None})
@@ -518,8 +522,15 @@ def carregar_contexto(con, regras: list[Regra]) -> Contexto:
                 ctx.dominios.setdefault(int(dominio), set()).add(valor)
         referencias = {r.referencia for r in regras if r.referencia}
         if "imovel_rural" in referencias:
-            cur.execute("SELECT cod_imovel FROM imovel_rural")
-            ctx.imoveis = {v for (v,) in cur}
+            if linha is None:
+                cur.execute("SELECT cod_imovel FROM imovel_rural")
+                ctx.imoveis = {v for (v,) in cur}
+            else:
+                for r in regras:
+                    valor = (linha.get(r.coluna) or "").strip()
+                    if r.referencia == "imovel_rural" and valor:
+                        cur.execute("SELECT cod_imovel FROM imovel_rural WHERE cod_imovel = :v", v=valor)
+                        ctx.imoveis.update(v for (v,) in cur)
         if "municipio" in referencias:
             cur.execute("SELECT cod_ibge, nome, estado FROM municipio")
             for cod_ibge, nome, estado in cur:
@@ -535,7 +546,11 @@ def carregar_contexto(con, regras: list[Regra]) -> Contexto:
             tabela, chave = _nome_sql(chaves[0].tabela), _nome_sql(chaves[0].campo)
             campo = _nome_sql(r.campo)
             # "|| ''" converte como o Oracle concatenava no motivo (o NLS da sessão).
-            cur.execute(f"SELECT {chave}, {campo} || '' FROM {tabela} WHERE {campo} IS NOT NULL")
+            sql = f"SELECT {chave}, {campo} || '' FROM {tabela} WHERE {campo} IS NOT NULL"
+            if linha is None:
+                cur.execute(sql)
+            else:
+                cur.execute(f"{sql} AND {chave} = :chave", chave=(linha.get(chaves[0].coluna) or "").strip())
             ctx.anteriores[r.campo] = {str(k): v for k, v in cur}
     return ctx
 
@@ -543,17 +558,27 @@ def carregar_contexto(con, regras: list[Regra]) -> Contexto:
 def contorno_pr(cur) -> BaseGeometry | None:
     """O contorno do PR: a união dos municípios do PR que estão na Tratada (None se não houver).
     Simplificado (~10 m cada município, ~20 m o contorno), como a grade do banco fazia: a margem
-    da divisa é de 1 km, e a união dos municípios detalhados levaria segundos a cada carga."""
+    da divisa é de 1 km. A união leva segundos, e o "Revalidar" precisa responder na hora: fica num
+    arquivo temporário enquanto a malha for a mesma (a maior versão e a quantidade de municípios)."""
+    cur.execute("SELECT MAX(dataset_versao_id), COUNT(*) FROM municipio WHERE estado = 'PR'")
+    versao, quantidade = cur.fetchone()
+    if not quantidade:
+        return None
+    cache = Path(tempfile.gettempdir()) / f"georural-contorno-pr-{versao}-{quantidade}.wkb"
+    if cache.exists():
+        return shapely.from_wkb(cache.read_bytes())
     # O WKB vem direto em bytes (LONG_RAW), e não como LOB lido um por um: 399 idas ao banco a menos.
     cur.outputtypehandler = lambda c, m: (c.var(oracledb.DB_TYPE_LONG_RAW, arraysize=c.arraysize)
                                           if m.type_code is oracledb.DB_TYPE_BLOB else None)
     cur.execute("SELECT SDO_UTIL.TO_WKBGEOMETRY(geometria) FROM municipio WHERE estado = 'PR'")
     municipios = [shapely.from_wkb(w) for (w,) in cur]
     cur.outputtypehandler = None
-    if not municipios:
-        return None
     simplificados = shapely.simplify(shapely.make_valid(np.array(municipios, dtype=object)), 1e-4)
-    return shapely.simplify(shapely.union_all(simplificados), 2e-4)
+    contorno = shapely.simplify(shapely.union_all(simplificados), 2e-4)
+    temporario = cache.with_suffix(f".{os.getpid()}.tmp")
+    temporario.write_bytes(shapely.to_wkb(contorno))
+    temporario.replace(cache)  # troca atômica: duas cargas ao mesmo tempo não leem pela metade
+    return contorno
 
 
 def _nome_sql(nome: str) -> str:

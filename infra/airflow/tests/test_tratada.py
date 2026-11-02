@@ -7,9 +7,10 @@ from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
 from shapely.geometry import LineString, MultiPoint, MultiPolygon, Point, box
 
-from georural import colunas, generico, leitura, sdo, tratada
+from georural import colunas, generico, leitura, revalidacao, sdo, tratada
 from georural.regras import Regra
 
 
@@ -248,3 +249,47 @@ def test_descartes_marca_a_ocorrencia_certa_de_cada_codigo():
 
     assert generico._descartes(plano, cols, {"cod": ["A", "B", " A ", "A"]}) == {2: "perde"}
     assert generico._descartes({}, cols, {"cod": ["A"]}) == {}
+
+
+# ------------------------------------------------------------------ Revalidar
+
+def test_gravar_um_atualiza_a_chave_que_existe_e_insere_a_que_nao_existe():
+    regras = [_regra("id", id_=1, campo="objectid", chave=True), _regra("v", id_=2, campo="valor")]
+    banco = BancoFalso(COLUNAS)
+    t = _tratada(banco, regras)
+    destino = t.destinos[0]
+    linha = t.linha(destino, {"id": "7", "v": "a"}, None)
+
+    class Achou(CursorFalso):
+        def fetchone(self):
+            return ("rid7",)
+
+    class NaoAchou(CursorFalso):
+        def fetchone(self):
+            return None
+
+    assert t.gravar_um(Achou(banco), destino, linha) is False
+    assert banco.instrucoes["UPDATE"][0][0]["rid"] == "rid7"
+    assert t.gravar_um(NaoAchou(banco), destino, linha) is True
+    assert len(banco.instrucoes["INSERT"]) == 1
+
+
+def test_revalidar_nao_volta_o_dado_para_tras():
+    regras = [_regra("id", id_=1, campo="objectid", chave=True)]
+    banco = BancoFalso(COLUNAS)
+    t = _tratada(banco, regras)
+    destino = t.destinos[0]
+    linha = t.linha(destino, {"id": "7"}, None)
+
+    class Versao(CursorFalso):
+        def __init__(self, banco_, maior):
+            super().__init__(banco_)
+            self.maior = maior
+
+        def fetchone(self):
+            return (self.maior,)
+
+    with pytest.raises(revalidacao.Recusa, match="carga mais recente"):
+        revalidacao._nao_voltar_para_tras(Versao(banco, 5), destino, linha, 3, "c")
+    revalidacao._nao_voltar_para_tras(Versao(banco, 3), destino, linha, 3, "c")   # a mesma versão pode
+    revalidacao._nao_voltar_para_tras(Versao(banco, None), destino, linha, 3, "c")

@@ -114,7 +114,9 @@ def _numeros_exatos(cursor, metadado):
 class Tratada:
     """Grava os aprovados de uma carga nas tabelas de destino da fonte."""
 
-    def __init__(self, con, regras: list[Regra], versao_id: int, conjunto: str | None):
+    def __init__(self, con, regras: list[Regra], versao_id: int, conjunto: str | None, carregar: bool = True):
+        """`carregar`: lê o que as tabelas já têm, para a carga comparar; o "Revalidar" (gravar_um),
+        que mexe numa linha só, não precisa."""
         self.con = con
         self.versao_id = versao_id
         self.conjunto = conjunto
@@ -134,7 +136,8 @@ class Tratada:
                 destino = Destino(tabela, regras_tabela, colunas)
                 destino.modo = ("chave" if destino.chaves else
                                 "imovel" if any(r.campo == "cod_imovel" for r in regras_tabela) else "conjunto")
-                self._carregar(cur, destino)
+                if carregar:
+                    self._carregar(cur, destino)
                 self.destinos.append(destino)
 
     # -------------------------------------------------------------- o que a tabela já tem
@@ -258,6 +261,23 @@ class Tratada:
         if destino.geometria is None:
             binds.pop("geometria")
         return binds
+
+    def gravar_um(self, cur, destino: Destino, linha: dict) -> bool:
+        """Grava uma linha sem dar commit, como a carga: com chave, atualiza a linha da chave se
+        houver; sem chave, é mais uma linha da carga. Devolve True se a linha é nova na tabela."""
+        if destino.chaves:
+            condicoes = " AND ".join(f"{r.campo} = :k{i}" for i, r in enumerate(destino.chaves))
+            binds = {f"k{i}": linha["valores"].get(r.campo) for i, r in enumerate(destino.chaves)}
+            if destino.tabela == "input_feature" and self.conjunto:
+                condicoes += " AND dataset_versao_id IN (SELECT id FROM dataset_versao WHERE conjunto = :conjunto)"
+                binds["conjunto"] = self.conjunto
+            cur.execute(f"SELECT ROWIDTOCHAR(ROWID) FROM {destino.tabela} WHERE {condicoes}", **binds)
+            achada = cur.fetchone()
+            if achada:
+                self._alterar(cur, destino, [(achada[0], linha)])
+                return False
+        self._inserir(cur, destino, [linha])
+        return True
 
     def finalizar(self) -> Contagem:
         """Na carga-retrato, apaga o que não veio mais. Não dá commit (vai junto com a conclusão)."""
