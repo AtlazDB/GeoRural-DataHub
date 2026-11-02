@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import threading
+import time
 import zipfile
 from urllib.parse import parse_qsl, urlsplit
 
@@ -72,7 +74,7 @@ def test_arcgis_coleta_tudo_ordenado_pelo_objectid(tmp_path):
 
     assert (r.total, r.coletados, r.paginas) == (4500, 4500, 3)
     assert _ids(r.caminho) == [str(i) for i in range(4500)]
-    paginas = [p for p in servidor.pedidos if "resultoffset" in p]
+    paginas = sorted((p for p in servidor.pedidos if "resultoffset" in p), key=lambda p: int(p["resultoffset"]))
     assert [p["resultoffset"] for p in paginas] == ["0", "2000", "4000"]
     assert all(p["orderbyfields"] == "OBJECTID" and p["f"] == "geojson" and p["outsr"] == "4674" for p in paginas)
 
@@ -83,9 +85,10 @@ def test_wfs_remove_a_paginacao_do_link_e_ordena_pela_chave(tmp_path):
     r = coleta.coletar(WFS, tmp_path, "CAR-WFS", chaves=["cod_imovel"], cliente=servidor, pausa=0)
 
     assert r.coletados == 12000
-    paginas = [p for p in servidor.pedidos if "startindex" in p]
+    paginas = sorted((p for p in servidor.pedidos if "startindex" in p), key=lambda p: int(p["startindex"]))
     assert [p["startindex"] for p in paginas] == ["0", "5000", "10000"]
-    assert all(p["count"] == "5000" and p["sortby"] == "cod_imovel" for p in paginas)
+    assert [p["count"] for p in paginas] == ["5000", "5000", "2000"]  # a última pede só o que falta
+    assert all(p["sortby"] == "cod_imovel" for p in paginas)
     hits = next(p for p in servidor.pedidos if p.get("resulttype") == "hits")
     assert "outputformat" not in hits  # o total vem no XML
 
@@ -142,3 +145,165 @@ def test_validar_url_recusa_rede_interna():
     for url in ("http://127.0.0.1/x", "http://169.254.169.254/latest", "http://10.0.0.5/a", "ftp://x.gov.br/a"):
         with pytest.raises(coleta.ColetaFalhou):
             coleta.validar_url(url)
+
+
+# ------------------------------------------------------------------ páginas em paralelo
+
+class ServidorLento(ServidorFalso):
+    """Demora para responder e conta quantos pedidos de página estão abertos ao mesmo tempo. As
+    páginas do começo demoram mais: as respostas chegam fora de ordem."""
+
+    def __init__(self, total: int, **kwargs):
+        super().__init__(total, **kwargs)
+        self.trava = threading.Lock()
+        self.abertos = 0
+        self.maximo = 0
+
+    def texto(self, url: str) -> bytes:
+        inicio = dict(parse_qsl(urlsplit(url).query)).get("resultOffset")
+        if inicio is None:
+            return super().texto(url)
+        with self.trava:
+            self.abertos += 1
+            self.maximo = max(self.maximo, self.abertos)
+        try:
+            time.sleep(0.05 if int(inicio) < 6000 else 0.01)
+            return super().texto(url)
+        finally:
+            with self.trava:
+                self.abertos -= 1
+
+
+def test_zip_igual_com_um_e_com_quatro_pedidos_ao_mesmo_tempo(tmp_path):
+    (tmp_path / "1").mkdir()
+    (tmp_path / "4").mkdir()
+    um = coleta.coletar(ARCGIS, tmp_path / "1", "F", cliente=ServidorLento(total=9500), pausa=0, paralelo=1)
+    lento = ServidorLento(total=9500)
+    quatro = coleta.coletar(ARCGIS, tmp_path / "4", "F", cliente=lento, pausa=0, paralelo=4)
+
+    assert um.hash_sha256 == quatro.hash_sha256  # o "sem mudança" continua valendo
+    assert _ids(quatro.caminho) == [str(i) for i in range(9500)]  # na ordem, mesmo chegando fora dela
+    assert lento.maximo == 4
+
+
+def test_um_pedido_por_vez_quando_paralelo_e_1(tmp_path):
+    lento = ServidorLento(total=9500)
+
+    coleta.coletar(ARCGIS, tmp_path, "F", cliente=lento, pausa=0, paralelo=1)
+
+    assert lento.maximo == 1
+
+
+def test_so_a_faixa_com_erro_e_dividida(tmp_path):
+    class FalhaEm4000(ServidorFalso):
+        def texto(self, url):
+            p = dict(parse_qsl(urlsplit(url).query))
+            if p.get("resultOffset") == "4000" and int(p["resultRecordCount"]) > 500:
+                raise coleta._ErroDoServidor("HTTP 500")
+            return super().texto(url)
+
+    servidor = FalhaEm4000(total=8000)
+    r = coleta.coletar(ARCGIS, tmp_path, "F", cliente=servidor, pausa=0, paralelo=3)
+
+    assert _ids(r.caminho) == [str(i) for i in range(8000)]
+    pedidos = {(p["resultoffset"], p["resultrecordcount"]) for p in servidor.pedidos if "resultoffset" in p}
+    assert {("2000", "2000"), ("6000", "2000")} <= pedidos  # as outras faixas seguem com 2.000
+    # 4000+2000 falhou, 4000+1000 também: 4000+500 e 4500+500 resolvem, e 5000+1000 já passa
+    assert {("4000", "500"), ("4500", "500"), ("5000", "1000")} <= pedidos
+
+
+def test_servidor_que_entrega_menos_no_meio_tem_o_resto_pedido_de_novo(tmp_path):
+    class CortaEm2000(ServidorFalso):
+        def texto(self, url):
+            p = dict(parse_qsl(urlsplit(url).query))
+            if p.get("resultOffset") == "2000":
+                url = url.replace("resultRecordCount=2000", "resultRecordCount=1500")
+            return super().texto(url)
+
+    r = coleta.coletar(ARCGIS, tmp_path, "F", cliente=CortaEm2000(total=6000), pausa=0, paralelo=2)
+
+    assert _ids(r.caminho) == [str(i) for i in range(6000)]
+    assert r.paginas == 4  # 0-2000, 2000-3500, 3500-4000, 4000-6000
+
+
+def test_paralelo_pela_variavel_de_ambiente(monkeypatch):
+    monkeypatch.delenv("GEORURAL_COLETA_PARALELO", raising=False)
+    assert coleta._paralelo() == coleta.PARALELO
+    monkeypatch.setenv("GEORURAL_COLETA_PARALELO", "1")
+    assert coleta._paralelo() == 1
+
+
+def test_mensagem_traz_a_duracao(tmp_path):
+    r = coleta.coletar(ARCGIS, tmp_path, "F", cliente=ServidorFalso(total=2100), pausa=0)
+
+    assert r.segundos is not None
+    assert r.mensagem().startswith("2.100 registros coletados em 2 página(s) em ")
+
+
+def test_pagina_vazia_no_meio_e_pedida_de_novo(tmp_path):
+    class VaziaUmaVez(ServidorFalso):
+        """Como o ArcGIS do IAT sob carga: HTTP 200 sem feição, e no pedido seguinte vem certo."""
+        def __init__(self, total):
+            super().__init__(total)
+            self.vazias = {"4000", "6000"}
+
+        def texto(self, url):
+            inicio = dict(parse_qsl(urlsplit(url).query)).get("resultOffset")
+            if inicio in self.vazias:
+                self.vazias.discard(inicio)
+                return json.dumps({"type": "FeatureCollection", "features": []}).encode()
+            return super().texto(url)
+
+    r = coleta.coletar(ARCGIS, tmp_path, "F", cliente=VaziaUmaVez(total=8000), pausa=0, paralelo=4)
+
+    assert _ids(r.caminho) == [str(i) for i in range(8000)]
+    assert r.paginas == 4
+
+
+class NaoAguentaParalelo(ServidorFalso):
+    """Responde HTTP 200 vazio sempre que há mais de um pedido de página aberto ao mesmo tempo."""
+
+    def __init__(self, total: int):
+        super().__init__(total)
+        self.trava = threading.Lock()
+        self.abertos = 0
+
+    def texto(self, url: str) -> bytes:
+        if "resultOffset" not in url:
+            return super().texto(url)
+        with self.trava:
+            self.abertos += 1
+            sobrecarga = self.abertos > 1
+        try:
+            time.sleep(0.02)
+            if sobrecarga:
+                return json.dumps({"type": "FeatureCollection", "features": []}).encode()
+            return super().texto(url)
+        finally:
+            with self.trava:
+                self.abertos -= 1
+
+
+def test_servidor_que_nao_aguenta_paralelo_segue_uma_pagina_por_vez(tmp_path):
+    (tmp_path / "1").mkdir()
+    (tmp_path / "4").mkdir()
+    um = coleta.coletar(ARCGIS, tmp_path / "1", "F", cliente=ServidorFalso(total=12000), pausa=0, paralelo=1)
+
+    r = coleta.coletar(ARCGIS, tmp_path / "4", "F", cliente=NaoAguentaParalelo(total=12000), pausa=0, paralelo=4)
+
+    assert _ids(r.caminho) == [str(i) for i in range(12000)]
+    assert r.hash_sha256 == um.hash_sha256  # as faixas refeitas uma por vez dão o mesmo zip
+    assert r.avisos == ["O servidor falhou com pedidos em paralelo; a coleta seguiu uma página por vez."]
+    assert r.mensagem().endswith("a coleta seguiu uma página por vez.")
+    assert not um.avisos
+
+
+def test_falha_se_nem_uma_pagina_por_vez_funciona(tmp_path):
+    class SempreFalhaEm4000(ServidorFalso):
+        def texto(self, url):
+            if "resultOffset=4000" in url:
+                raise coleta._ErroDoServidor("HTTP 500")
+            return super().texto(url)
+
+    with pytest.raises(coleta.ColetaFalhou, match="mesmo com páginas de 50 registros"):
+        coleta.coletar(ARCGIS, tmp_path, "F", cliente=SempreFalhaEm4000(total=8000), pausa=0, paralelo=4)

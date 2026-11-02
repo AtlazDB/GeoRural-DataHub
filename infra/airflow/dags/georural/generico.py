@@ -21,8 +21,10 @@ Versão + staging + Tratada + quarentena + conclusão ficam numa transação só
 
 import logging
 import tempfile
+import time
 from collections import defaultdict
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import oracledb
@@ -73,6 +75,8 @@ class Resumo:
     substituidos: int = 0
     colunas_novas: int = 0
     indicadores: str | None = None
+    # Segundos de cada etapa, na ordem em que rodaram: a base para comparar mudanças no processamento.
+    tempos: dict[str, float] = field(default_factory=dict)
 
 
 def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
@@ -91,11 +95,12 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
 
         # 1ª passada: as colunas que vieram e os valores do desempate (sem geometria, cabe na memória).
         levantamento = colunas.Levantamento()
-        for registro in leitura.registros(local, pasta / "p1"):
-            levantamento.acrescentar(registro.atributos, registro.geometria)
-            for nome, lista in valores_desempate.items():
-                lista.append(registro.atributos.get(nome))
-            resumo.lidos += 1
+        with _etapa(resumo, "leitura"):
+            for registro in leitura.registros(local, pasta / "p1"):
+                levantamento.acrescentar(registro.atributos, registro.geometria)
+                for nome, lista in valores_desempate.items():
+                    lista.append(registro.atributos.get(nome))
+                resumo.lidos += 1
         resumo.colunas_novas = colunas.detectar_colunas(con, fonte_id, levantamento)
         con.commit()  # as colunas ficam registradas mesmo se o resto falhar: a tela de mapeamento usa
         log.info("%d registros, %d colunas (%d novas)", resumo.lidos, len(levantamento.nomes), resumo.colunas_novas)
@@ -118,33 +123,55 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
                 resumo.versao = versao.numero
                 ocorrencias: dict[str, int] = defaultdict(int)
 
-                for lote in leitura.lotes(local, pasta / "p2", cfg.tamanho_lote):
-                    staging, descartes = [], []
-                    for registro in lote:
-                        descarte = _descarte(registro, plano, cols, ocorrencias)
-                        (descartes if descarte else staging).append((registro, descarte))
-                    _gravar_staging(cur, execucao_id, [r for r, _ in staging])
-                    _gravar_descartes(cur, execucao_id, versao.id, entidade, cols, descartes)
-                    resumo.descartados_automaticamente += len(descartes)
+                with _etapa(resumo, "staging"):
+                    for lote in leitura.lotes(local, pasta / "p2", cfg.tamanho_lote):
+                        staging, descartes = [], []
+                        for registro in lote:
+                            descarte = _descarte(registro, plano, cols, ocorrencias)
+                            (descartes if descarte else staging).append((registro, descarte))
+                        _gravar_staging(cur, execucao_id, [r for r, _ in staging])
+                        _gravar_descartes(cur, execucao_id, versao.id, entidade, cols, descartes)
+                        resumo.descartados_automaticamente += len(descartes)
 
                 log.info("Staging gravada; validando (pkg_quality.validate)")
-                cur.callproc("pkg_quality.validate", [execucao_id])
-                resumo.validos = int(cur.callfunc("pkg_tratada.gravar_aprovados", oracledb.DB_TYPE_NUMBER,
+                with _etapa(resumo, "validacao"):
+                    cur.callproc("pkg_quality.validate", [execucao_id])
+                with _etapa(resumo, "tratada"):
+                    resumo.validos = int(cur.callfunc("pkg_tratada.gravar_aprovados", oracledb.DB_TYPE_NUMBER,
+                                                      [execucao_id, versao.id]))
+                with _etapa(resumo, "quarentena"):
+                    reprovados = int(cur.callfunc("pkg_tratada.gravar_reprovados", oracledb.DB_TYPE_NUMBER,
                                                   [execucao_id, versao.id]))
-                reprovados = int(cur.callfunc("pkg_tratada.gravar_reprovados", oracledb.DB_TYPE_NUMBER,
-                                              [execucao_id, versao.id]))
                 resumo.invalidos = reprovados + resumo.descartados_automaticamente
-                resumo.substituidos = gravacao.concluir(cur, arquivo_id, execucao_id, versao,
-                                                        resumo.lidos, resumo.validos, resumo.invalidos)
-                cur.execute("DELETE FROM staging_registro WHERE execucao_id = :id", id=execucao_id)
-            con.commit()
+                with _etapa(resumo, "conclusao"):
+                    resumo.substituidos = gravacao.concluir(cur, arquivo_id, execucao_id, versao,
+                                                            resumo.lidos, resumo.validos, resumo.invalidos)
+                    cur.execute("DELETE FROM staging_registro WHERE execucao_id = :id", id=execucao_id)
+                    con.commit()
         except Exception:
             con.rollback()
             raise
 
-        resumo.indicadores = _recalcular_indicadores(con, resumo.conjunto)
+        with _etapa(resumo, "indicadores"):
+            resumo.indicadores = _recalcular_indicadores(con, resumo.conjunto)
     log.info("Arquivo %s processado: %s", arquivo_id, resumo)
+    log.info("Tempos do arquivo %s (s): %s", arquivo_id, _tempos(resumo))
     return resumo
+
+
+@contextmanager
+def _etapa(resumo: Resumo, nome: str):
+    """Mede uma etapa e guarda em resumo.tempos (vai para o XCom da DAG junto com o resumo)."""
+    inicio = time.monotonic()
+    try:
+        yield
+    finally:
+        resumo.tempos[nome] = round(time.monotonic() - inicio, 1)
+
+
+def _tempos(resumo: Resumo) -> str:
+    return " · ".join(f"{nome} {segundos:.1f}" for nome, segundos in resumo.tempos.items()) \
+        + f" · total {sum(resumo.tempos.values()):.1f}"
 
 
 def _fonte(con, arquivo_id: int) -> int:
