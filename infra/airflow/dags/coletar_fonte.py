@@ -43,6 +43,7 @@ def _registrar_falha(context) -> None:
     start_date=pendulum.datetime(2026, 10, 1, tz="America/Sao_Paulo"),
     catchup=False,
     max_active_runs=1,
+    is_paused_upon_creation=False,  # sem agendamento: só roda quando um botão dispara
     tags=["georural", "coleta"],
     doc_md=__doc__,
     params={

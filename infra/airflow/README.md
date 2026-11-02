@@ -30,9 +30,9 @@ back-end e o **bucket real** da OCI (com a sua chave da API, a mesma do back-end
    ```
 5. Abra http://localhost:8088 (sem login em dev; a 8080 fica para o back-end) e rode a DAG `teste_conexoes`:
    as duas tarefas verdes = Oracle e bucket funcionando
-6. Ative as DAGs `processar_arquivo`, `coletar_fonte` e `revalidar_registro`. O back-end não processa
-   nada: todo upload, todo clique em "Processar" e todo "Executar" de fonte por link dispara uma DAG
-   pela API REST. Nenhuma DAG roda por agendamento: sem clique, não há execução (cada execução tem
+6. As DAGs `processar_arquivo`, `coletar_fonte` e `revalidar_registro` já nascem ativas. O back-end não
+   processa nada: todo upload, todo clique em "Processar" e todo "Executar" de fonte por link dispara uma
+   DAG pela API REST. Nenhuma DAG roda por agendamento: sem clique, não há execução (cada execução tem
    custo). Com o Airflow fora do ar ou a DAG pausada, o botão responde 503 com o motivo; é só tentar de novo.
 7. Para a demonstração com as fontes por link (municípios, focos, Reserva Legal e CAR pelo WFS),
    rode uma vez o `db/seed-demo/fontes.sql` do back-end: ele cadastra as 4 fontes com o mapeamento.
@@ -131,7 +131,7 @@ tela ──> back-end ──> API REST do Airflow ──> DAG revalidar_registro
   encerrado e nao deixa um registro antigo voltar o dado de uma carga mais nova.
 * **O back-end precisa alcancar a API do Airflow:** `AIRFLOW_URL`, `AIRFLOW_USUARIO` e `AIRFLOW_SENHA`
   no `.env` dele. Com o Airflow fora do ar, o Revalidar responde 503 com a mensagem; o resto da aplicacao segue.
-* A DAG `revalidar_registro` nasce ativa (`is_paused_upon_creation=False`).
+* A DAG `revalidar_registro` nasce ativa (`is_paused_upon_creation=False`), como as outras disparadas pelos botoes.
 
 ## Subir na VM (producao)
 
@@ -163,7 +163,7 @@ ssh -L 8088:localhost:8088 ubuntu@<IP da VM>      # do seu computador
 cat ~/Atlaz4/infra/airflow/config/simple_auth_manager_passwords.json.generated   # senha do admin
 ```
 Abra http://localhost:8088, rode a DAG `teste_conexoes` (as duas tarefas verdes = Autonomous e
-bucket funcionando) e ative `processar_arquivo`, `coletar_fonte` e `revalidar_registro`.
+bucket funcionando). As DAGs `processar_arquivo`, `coletar_fonte` e `revalidar_registro` ja nascem ativas.
 O back-end dispara as DAGs pela API REST: a VM do back-end precisa alcancar a do Airflow (rede privada,
 nunca a porta aberta na internet), com `AIRFLOW_URL`, `AIRFLOW_USUARIO` e `AIRFLOW_SENHA` no `.env` dela.
 
