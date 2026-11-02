@@ -1,6 +1,6 @@
 """O lado do banco da coleta por link: pedidos na fila, andamento e o arquivo gravado na zona bruta.
 
-O "Executar" da tela (back-end, com AIRFLOW_HABILITADO) só marca fonte.coleta_solicitada_em. O
+O "Executar" da tela (back-end) só marca fonte.coleta_solicitada_em. O
 coleta_fontes reserva esses pedidos e dispara o coletar_fonte, que vai escrevendo o andamento em
 fonte.ultima_coleta_mensagem e, no fim, grava o arquivo_bruto RECEBIDO (origem COLETA), que o
 varredor_bruta pega como qualquer upload.

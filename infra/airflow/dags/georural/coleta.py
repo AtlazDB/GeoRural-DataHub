@@ -19,9 +19,8 @@ mudou desde a última coleta.
 Um link que não é serviço (zip, CSV, GeoJSON para baixar) é baixado de uma vez, conferindo o
 tamanho anunciado pelo servidor.
 
-Lições do PaginadorUrlGeoJson do DataGIS aproveitadas aqui: tamanho de página que cai pela metade
-quando o servidor dá erro 5xx (até 50), trava de páginas e remoção dos parâmetros de paginação que
-já vierem no link.
+Proteções da paginação: tamanho de página que cai pela metade quando o servidor dá erro 5xx (até
+50), trava de páginas e remoção dos parâmetros de paginação que já vierem no link.
 """
 
 import hashlib
@@ -184,8 +183,8 @@ class ClienteHttp:
         raise ColetaFalhou("O link redirecionou vezes demais.")
 
     def texto(self, url: str) -> bytes:
-        """Corpo de um GET. HTTP 500 e tempo esgotado saem na hora (quem chama divide a página, como
-        o DataGIS); erro passageiro (429, 502, 503, 504, conexão caída) ganha até TENTATIVAS novas
+        """Corpo de um GET. HTTP 500 e tempo esgotado saem na hora (quem chama divide a
+        página); erro passageiro (429, 502, 503, 504, conexão caída) ganha até TENTATIVAS novas
         tentativas."""
         espera = 2
         for tentativa in range(1, TENTATIVAS + 1):

@@ -30,12 +30,11 @@ back-end e o **bucket real** da OCI (com a sua chave da API, a mesma do back-end
    ```
 5. Abra http://localhost:8088 (sem login em dev; a 8080 fica para o back-end) e rode a DAG `teste_conexoes`:
    as duas tarefas verdes = Oracle e bucket funcionando
-6. Ative as DAGs `varredor_bruta`, `processar_arquivo`, `coleta_fontes` e `coletar_fonte` e, no
-   `.env` do **back-end**, use `AIRFLOW_HABILITADO=true`. Daí em diante, todo upload, todo clique em
-   "Processar" e todo "Executar" de fonte por link fica com o Airflow.
-7. Para a demonstração com as fontes do DataGIS (municípios, focos, Reserva Legal e CAR pelo WFS),
-   rode uma vez o `Atlaz4-BackEnd/db/seed-demo/fontes_datagis.sql`: ele cadastra as 4 fontes por
-   link com o mapeamento.
+6. Ative as DAGs `varredor_bruta`, `processar_arquivo`, `coleta_fontes` e `coletar_fonte`. O back-end
+   não processa nada: todo upload, todo clique em "Processar" e todo "Executar" de fonte por link
+   fica com o Airflow.
+7. Para a demonstração com as fontes por link (municípios, focos, Reserva Legal e CAR pelo WFS),
+   rode uma vez o `db/seed-demo/fontes.sql` do back-end: ele cadastra as 4 fontes com o mapeamento.
 
 Testes do pipeline (dentro da imagem, que ja tem as bibliotecas):
 ```bash
@@ -123,8 +122,7 @@ cat ~/Atlaz4/infra/airflow/config/simple_auth_manager_passwords.json.generated  
 ```
 Abra http://localhost:8088, rode a DAG `teste_conexoes` (as duas tarefas verdes = Autonomous e
 bucket funcionando) e ative `varredor_bruta`, `processar_arquivo`, `coleta_fontes` e `coletar_fonte`.
-Na VM do back-end, `AIRFLOW_HABILITADO=true` no `.env`: o back so marca os arquivos e os pedidos de
-coleta no banco, e o Airflow os pega. As duas VMs nao precisam se enxergar.
+O back-end so marca os arquivos e os pedidos de coleta no banco, e o Airflow os pega. As duas VMs nao precisam se enxergar.
 
 ## Como aplicar uma mudanca
 

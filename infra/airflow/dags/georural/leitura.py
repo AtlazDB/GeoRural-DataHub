@@ -204,7 +204,7 @@ def wkb(geometria: BaseGeometry | None) -> bytes | None:
 
     * tira os vértices seguidos a menos de VERTICE_REPETIDO um do outro. Abaixo da tolerância
       do banco (5 cm) o Oracle reprova com ORA-13356 ("vértice duplicado"): na Reserva Legal do
-      IAT eram 130 mil de 348 mil polígonos. O JTS do DataGIS nem considera isso erro;
+      IAT eram 130 mil de 348 mil polígonos. O JTS nem considera isso erro;
     * põe o anel externo no sentido anti-horário que o Oracle exige (o shapefile e boa parte dos
       serviços guardam no horário).
 
