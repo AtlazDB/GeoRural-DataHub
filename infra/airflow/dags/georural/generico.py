@@ -161,6 +161,10 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
             total = Contagem()
             gravou = False
             chaves_aprovadas: set[str] = set()
+            # Sem chave, a carga é um retrato: encerra na quarentena o que ela substituiu.
+            retrato = None
+            if not regras.regras_de_chave(lista):
+                retrato = gravacao.Retrato(next((r.coluna for r in lista if r.campo == "cod_imovel"), None))
 
             posicao = 0  # posição, no arquivo inteiro, da 1ª linha do bloco
             for bloco in leitura.tabelas(local, pasta / "p2", cfg.tamanho_lote):
@@ -184,6 +188,8 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
                     total.somar(tratada.gravar(linhas))  # dá o commit do bloco
                     gravou = True
                 chaves_aprovadas.update(c for j, c in enumerate(v.chave_natural) if c is not None and j not in reprovadas)
+                if retrato and retrato.coluna_imovel:
+                    retrato.imoveis.update(t.strip() for t in textos[retrato.coluna_imovel].dropna() if t.strip())
                 resumo.descartados_automaticamente += len(perdedores)
                 resumo.invalidos += len(reprovadas) + len(perdedores)
                 resumo.validos += len(ficam) - len(reprovadas)
@@ -195,7 +201,7 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
                 total.somar(tratada.finalizar())
                 with con.cursor() as cur:
                     resumo.substituidos = gravacao.concluir(cur, arquivo_id, execucao_id, versao, resumo.lidos,
-                                                            resumo.validos, resumo.invalidos, chaves_aprovadas)
+                                                            resumo.validos, resumo.invalidos, chaves_aprovadas, retrato)
                 con.commit()
             resumo.inseridos, resumo.alterados = total.inseridos, total.alterados
             resumo.iguais, resumo.removidos = total.iguais, total.removidos

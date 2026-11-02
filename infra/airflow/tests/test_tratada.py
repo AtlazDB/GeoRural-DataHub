@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from shapely.geometry import LineString, MultiPoint, MultiPolygon, Point, box
 
-from georural import colunas, generico, leitura, revalidacao, sdo, tratada
+from georural import colunas, generico, gravacao, leitura, revalidacao, sdo, tratada
 from georural.regras import Regra
 
 
@@ -301,3 +301,19 @@ def test_revalidar_nao_volta_o_dado_para_tras():
         revalidacao._nao_voltar_para_tras(Versao(banco, 5), destino, linha, 3, "c")
     revalidacao._nao_voltar_para_tras(Versao(banco, 3), destino, linha, 3, "c")   # a mesma versão pode
     revalidacao._nao_voltar_para_tras(Versao(banco, None), destino, linha, 3, "c")
+
+
+# ------------------------------------------------------------------ quarentena na carga-retrato
+
+def test_retrato_por_imovel_so_substitui_o_imovel_que_veio():
+    retrato = gravacao.Retrato("cod_imovel", {"PR-1"})
+
+    assert retrato.substitui(json.dumps({"cod_imovel": " PR-1 "}))
+    assert not retrato.substitui(json.dumps({"cod_imovel": "PR-2"}))  # imóvel que não veio nesta carga
+    assert not retrato.substitui(json.dumps({"cod_imovel": None}))
+    assert not retrato.substitui(None)
+
+
+def test_retrato_do_conjunto_substitui_tudo():
+    assert gravacao.Retrato().substitui(json.dumps({"qualquer": "coisa"}))
+    assert gravacao.Retrato().substitui(None)

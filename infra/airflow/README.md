@@ -101,6 +101,8 @@ upload/coleta ──> arquivo_bruto (RECEBIDO) ──> varredor_bruta (a cada 2 
   por imovel (`cod_imovel`) ou pelo conjunto da fonte, saindo so o que nao veio mais. A linha igual
   nao e tocada e fica com a versao da carga que a gravou. Se a carga falhar no meio, os blocos ja
   gravados ficam, e a proxima so refaz o que falta.
+* **Quarentena sem duplicar:** cada carga encerra como SUBSTITUIDO o que ela resolveu. Com chave, pelo
+  codigo; sem chave, pelo imovel (`cod_imovel`) ou pelo conjunto da fonte.
 * **Geometria:** quem julga e o Shapely (GEOS, padrao OGC, sem tolerancia). O Oracle considerava
   encostado o que fica a menos de 5 cm e reprovava ~5% dos poligonos da Reserva Legal por detalhes de
   centimetros; esses entram como vieram. O Oracle so guarda e filtra (`SDO_FILTER`, `SDO_RELATE`):

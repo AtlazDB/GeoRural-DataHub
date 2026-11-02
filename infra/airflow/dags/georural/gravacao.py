@@ -6,7 +6,8 @@ destino, chave, tipo de erro, versão e geometria), que é o que o "Revalidar" d
 para o "Revalidar" gravar o registro depois.
 """
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 
 import oracledb
 import shapely
@@ -268,12 +269,32 @@ _SUBSTITUIR = """UPDATE registro_quarentena q
                         q.analisado_por = :autor, q.analisado_em = SYSTIMESTAMP"""
 
 
-def substituir_pendentes(cur, execucao_id: int, chaves_aprovadas: set[str] | None = None) -> int:
+@dataclass
+class Retrato:
+    """Uma carga sem chave: ela substitui o que veio antes. `coluna_imovel`: a coluna do cod_imovel
+    na fonte, quando a carga é um retrato por imóvel (a Reserva Legal), e `imoveis`, os que vieram
+    nela; sem a coluna, o retrato é do conjunto inteiro."""
+    coluna_imovel: str | None = None
+    imoveis: set[str] = field(default_factory=set)
+
+    def substitui(self, payload: str | None) -> bool:
+        """Esta carga substitui o registro antigo da quarentena com este payload?"""
+        if self.coluna_imovel is None:
+            return True
+        valor = json.loads(payload).get(self.coluna_imovel) if payload else None
+        return isinstance(valor, str) and valor.strip() in self.imoveis
+
+
+def substituir_pendentes(cur, execucao_id: int, chaves_aprovadas: set[str] | None = None,
+                         retrato: Retrato | None = None) -> int:
     """Encerra como SUBSTITUIDO o que esta carga resolveu, para reprocessar não duplicar a fila:
 
         1. o mesmo arquivo processado de novo: o que ficou aberto das execuções anteriores;
         2. outro arquivo, de versão anterior do conjunto, com um código que esta carga reprovou de
-           novo (o problema agora está no registro novo) ou aprovou.
+           novo (o problema agora está no registro novo) ou aprovou;
+        3. na carga sem chave (`retrato`), o que veio de versões anteriores do mesmo imóvel, ou do
+           conjunto: o registro antigo não tem código para comparar, e a carga trouxe o retrato novo.
+           Sem isso, cada carga da Reserva Legal repetia na fila os mesmos registros reprovados.
 
     `chaves_aprovadas`: as chaves naturais aprovadas nesta carga. Na carga incremental (generico.py)
     é preciso passar: a linha igual não é regravada e fica com a versão antiga, então a tabela de
@@ -309,6 +330,9 @@ def substituir_pendentes(cur, execucao_id: int, chaves_aprovadas: set[str] | Non
                 conjunto=conjunto, versao=numero, execucao=execucao_id, **binds)
     total += cur.rowcount
 
+    if retrato is not None:
+        total += _substituir_no_retrato(cur, retrato, anteriores, conjunto, numero, binds)
+
     if chaves_aprovadas is not None:
         cur.execute(f"""SELECT q.id, q.chave_natural FROM registro_quarentena q
                          WHERE {_EM_ABERTO} AND q.chave_natural IS NOT NULL AND {anteriores}""",
@@ -343,10 +367,25 @@ def substituir_pendentes(cur, execucao_id: int, chaves_aprovadas: set[str] | Non
     return total
 
 
+def _substituir_no_retrato(cur, retrato: Retrato, anteriores: str, conjunto: str, numero: int, binds: dict) -> int:
+    cur.execute(f"""SELECT q.id, q.payload FROM registro_quarentena q
+                     WHERE {_EM_ABERTO} AND q.chave_natural IS NULL AND {anteriores}""",
+                automatico=binds["automatico"], conjunto=conjunto, versao=numero)
+    substituidos = [{"id": i, "motivo": binds["motivo"], "autor": binds["autor"]} for i, payload in cur.fetchall()
+                    if retrato.substitui(payload.read() if hasattr(payload, "read") else payload)]
+    if substituidos:
+        cur.executemany("""UPDATE registro_quarentena
+                              SET status_analise = 'SUBSTITUIDO', justificativa = :motivo,
+                                  analisado_por = :autor, analisado_em = SYSTIMESTAMP
+                            WHERE id = :id""", substituidos)
+    return len(substituidos)
+
+
 # ------------------------------------------------------------------ fim
 
 def concluir(cur, arquivo_id: int, execucao_id: int, versao: Versao,
-             lidos: int, validos: int, invalidos: int, chaves_aprovadas: set[str] | None = None) -> int:
+             lidos: int, validos: int, invalidos: int, chaves_aprovadas: set[str] | None = None,
+             retrato: "Retrato | None" = None) -> int:
     """Fecha a carga. Devolve quantos registros antigos da quarentena ela substituiu
     (substituir_pendentes: reprocessar não duplica a fila)."""
     cur.execute(
@@ -358,7 +397,7 @@ def concluir(cur, arquivo_id: int, execucao_id: int, versao: Versao,
         lidos=lidos, validos=validos, invalidos=invalidos, id=execucao_id,
     )
     cur.execute("UPDATE dataset_versao SET registros = :n WHERE id = :id", n=validos, id=versao.id)
-    substituidos = substituir_pendentes(cur, execucao_id, chaves_aprovadas)
+    substituidos = substituir_pendentes(cur, execucao_id, chaves_aprovadas, retrato)
     cur.execute(
         "UPDATE arquivo_bruto SET status = 'PROCESSADO', processado_em = SYSTIMESTAMP WHERE id = :id",
         id=arquivo_id,
