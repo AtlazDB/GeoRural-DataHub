@@ -171,9 +171,17 @@ def test_canonico():
 # ------------------------------------------------------------------ SDO_GEOMETRY
 
 def test_sdo_ponto_linha_e_multi():
-    assert sdo.elementos(Point(-51, -25)) == (2001, [1, 1, 1], [-51.0, -25.0])
     assert sdo.elementos(MultiPoint([(1, 2), (3, 4)])) == (2005, [1, 1, 2], [1.0, 2.0, 3.0, 4.0])
     assert sdo.elementos(LineString([(1, 2), (3, 4)])) == (2002, [1, 2, 1], [1.0, 2.0, 3.0, 4.0])
+
+
+def test_sdo_ponto_vai_no_sdo_point():
+    # A API dos focos lê geometria.sdo_point.x e .y: em SDO_ORDINATES, o mapa fica sem os focos.
+    objeto = sdo.TiposSdo(BancoFalso([])).converter(Point(-51, -25))
+
+    assert (objeto.SDO_GTYPE, objeto.SDO_SRID) == (2001, 4326)
+    assert (objeto.SDO_POINT.X, objeto.SDO_POINT.Y) == (-51.0, -25.0)
+    assert not hasattr(objeto, "SDO_ORDINATES")
 
 
 def test_sdo_converte_vazio_em_nulo():
