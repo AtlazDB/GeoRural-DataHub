@@ -37,6 +37,8 @@ ENTIDADE_IMOVEIS = "imovel_rural"
 # ("DAG processar_arquivo") é o que o substituir_pendentes procura para
 # encerrar esses descartes quando uma carga mais nova decide de novo: não mude sem mudar lá.
 AUTOR_DESCARTE_AUTOMATICO = "DAG processar_arquivo (desempate de código repetido)"
+AUTOR_SEM_DADOS = "DAG processar_arquivo (registro sem geometria e sem área)"
+JUSTIFICATIVA_SEM_DADOS = "Descartado automaticamente: sem geometria e com área declarada 0, não há o que corrigir."
 
 SQL_MERGE_IMOVEL = """
     MERGE INTO imovel_rural d
@@ -324,7 +326,8 @@ def carregar_fila(cur, conjunto: str, com_chave: bool) -> FilaQuarentena:
     for id_, hash_, status, autor in linhas:
         if status == "REVALIDADO" and not com_chave:
             continue
-        encerrado = status == "REVALIDADO" or (status == "DESCARTADO" and autor != AUTOR_DESCARTE_AUTOMATICO)
+        encerrado = status == "REVALIDADO" or (status == "DESCARTADO"
+                                               and autor not in (AUTOR_DESCARTE_AUTOMATICO, AUTOR_SEM_DADOS))
         fila.por_hash.setdefault(hash_, []).append(None if encerrado else id_)
     return fila
 

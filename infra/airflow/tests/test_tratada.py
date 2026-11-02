@@ -363,7 +363,8 @@ def test_reprovado_diferente_e_gravado():
 
 
 @pytest.mark.parametrize("status,autor", [("PENDENTE", None), ("EM_ANALISE", None), ("CORRIGIDO", "ana"),
-                                          ("DESCARTADO", gravacao.AUTOR_DESCARTE_AUTOMATICO)])
+                                          ("DESCARTADO", gravacao.AUTOR_DESCARTE_AUTOMATICO),
+                                          ("DESCARTADO", gravacao.AUTOR_SEM_DADOS)])
 def test_igual_em_aberto_nao_e_gravado_e_passa_para_esta_carga(status, autor):
     cur = CursorDaFila()
     fila = _fila((1, "h1", status, autor))

@@ -52,12 +52,15 @@ SQL_DESCARTE = """
             :geometria, :hash_registro, 'DESCARTADO', :justificativa, :autor, SYSTIMESTAMP)
 """
 
-# Reprovado nas regras: um registro por linha, com o 1º erro e todos os motivos.
+# Reprovado nas regras: um registro por linha, com o 1º erro e todos os motivos. A linha sem dados
+# (regras.linhas_sem_dados) já entra descartada.
 SQL_REPROVADO = """
     INSERT INTO registro_quarentena (execucao_id, numero_linha, campo, motivo, payload, entidade,
-           chave_natural, tipo_erro, valor_recebido, dataset_versao_id, geometria, hash_registro)
+           chave_natural, tipo_erro, valor_recebido, dataset_versao_id, geometria, hash_registro,
+           status_analise, justificativa, analisado_por, analisado_em)
     VALUES (:execucao_id, :numero_linha, :campo, :motivo, :payload, :entidade,
-            :chave_natural, :tipo_erro, :valor_recebido, :dataset_versao_id, :geometria, :hash_registro)
+            :chave_natural, :tipo_erro, :valor_recebido, :dataset_versao_id, :geometria, :hash_registro,
+            :status_analise, :justificativa, :analisado_por, CASE WHEN :descartado = 1 THEN SYSTIMESTAMP END)
 """
 
 SQL_CORRECAO = """
@@ -85,7 +88,7 @@ class Resumo:
     lidos: int = 0
     validos: int = 0
     invalidos: int = 0
-    descartados_automaticamente: int = 0  # dentro de `invalidos`
+    descartados_automaticamente: int = 0  # dentro de `invalidos`: desempate e linhas sem dados
     substituidos: int = 0
     quarentena_iguais: int = 0  # dentro de `invalidos`: já estavam na quarentena, não foram gravados de novo
     colunas_novas: int = 0
@@ -178,6 +181,7 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
                     geometrias = np.array([leitura.normalizar(bloco.geometrias[i]) for i in ficam], dtype=object)
                     v = regras.validar(textos, geometrias, lista, ctx, repetidas=repetidas)
                     reprovadas = set(v.reprovadas().tolist())
+                    sem_dados = regras.linhas_sem_dados(v, textos, lista)
                     registros = textos.to_dict("records")
                     linhas = {d.tabela: [tratada.linha(d, registros[j], v.geometria[j])
                                          for j in range(len(ficam)) if j not in reprovadas]
@@ -186,14 +190,14 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
                     with con.cursor() as cur:
                         _gravar_descartes(cur, execucao_id, versao.id, entidade, cols,
                                           [(bloco, i, descartes[posicao + i]) for i in perdedores], fila)
-                        _gravar_reprovados(cur, execucao_id, versao.id, entidade, bloco, ficam, v, fila)
+                        _gravar_reprovados(cur, execucao_id, versao.id, entidade, bloco, ficam, v, fila, sem_dados)
                         _gravar_correcoes(cur, execucao_id, geometria, bloco, ficam, v)
                     total.somar(tratada.gravar(linhas))  # dá o commit do bloco
                     gravou = True
                 chaves_aprovadas.update(c for j, c in enumerate(v.chave_natural) if c is not None and j not in reprovadas)
                 if retrato and retrato.coluna_imovel:
                     retrato.imoveis.update(t.strip() for t in textos[retrato.coluna_imovel].dropna() if t.strip())
-                resumo.descartados_automaticamente += len(perdedores)
+                resumo.descartados_automaticamente += len(perdedores) + len(sem_dados)
                 resumo.invalidos += len(reprovadas) + len(perdedores)
                 resumo.validos += len(ficam) - len(reprovadas)
                 resumo.correcoes += len(v.correcoes)
@@ -318,13 +322,16 @@ def _gravar_descartes(cur, execucao_id: int, versao_id: int, entidade: str | Non
 
 
 def _gravar_reprovados(cur, execucao_id: int, versao_id: int, entidade: str | None, bloco: leitura.Tabela,
-                       ficam: list[int], v: regras.Validacao, fila: gravacao.FilaQuarentena) -> None:
+                       ficam: list[int], v: regras.Validacao, fila: gravacao.FilaQuarentena,
+                       sem_dados: set[int]) -> None:
     if v.erros.empty:
         return
     candidatos = []
     for r in regras.motivo_da_linha(v.erros).itertuples():
         payload = leitura.atributos_json(bloco.registro(ficam[r.linha]))
-        hash_ = gravacao.hash_quarentena(payload, r.campo, r.tipo_erro, r.motivo, v.geometria[r.linha])
+        # A justificativa entra no hash: o registro pendente de antes desta regra é outro, e é substituído.
+        motivo = f"{r.motivo} {gravacao.JUSTIFICATIVA_SEM_DADOS}" if r.linha in sem_dados else r.motivo
+        hash_ = gravacao.hash_quarentena(payload, r.campo, r.tipo_erro, motivo, v.geometria[r.linha])
         candidatos.append((hash_, bloco.linhas[ficam[r.linha]], (r, payload)))
     novos = fila.so_os_novos(cur, execucao_id, versao_id, candidatos)
     if not novos:
@@ -336,7 +343,11 @@ def _gravar_reprovados(cur, execucao_id: int, versao_id: int, entidade: str | No
          "motivo": r.motivo or "Reprovado na validação.", "payload": payload,
          "entidade": entidade, "chave_natural": v.chave_natural.iloc[r.linha], "tipo_erro": r.tipo_erro,
          "valor_recebido": r.valor_recebido, "dataset_versao_id": versao_id,
-         "geometria": _sdo_ou_nada(tipos, v.geometria[r.linha]), "hash_registro": hash_}
+         "geometria": _sdo_ou_nada(tipos, v.geometria[r.linha]), "hash_registro": hash_,
+         "status_analise": "DESCARTADO" if r.linha in sem_dados else "PENDENTE",
+         "justificativa": gravacao.JUSTIFICATIVA_SEM_DADOS if r.linha in sem_dados else None,
+         "analisado_por": gravacao.AUTOR_SEM_DADOS if r.linha in sem_dados else None,
+         "descartado": 1 if r.linha in sem_dados else 0}
         for hash_, (r, payload) in novos
     ])
 
