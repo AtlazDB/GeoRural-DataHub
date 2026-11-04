@@ -111,3 +111,40 @@ def count_fires(properties: gpd.GeoDataFrame, fires: gpd.GeoDataFrame) -> pd.Ser
     joined = gpd.sjoin(fires, properties[["cod_imovel", "geometry"]], predicate="intersects", how="inner")
     counts = joined.groupby("cod_imovel").size()
     return counts.reindex(properties["cod_imovel"], fill_value=0)
+
+
+def status_from_ranges(value: Decimal, ranges: list[dict]) -> str:
+    """Status de um indicador cadastrado pelas faixas dele (indicator_definition.ranges).
+
+    As faixas vêm em ordem: [{status, limit, includeLimit}, ..., {status}]. Vale a primeira em
+    que o valor cabe: até o limite com includeLimit (<=), abaixo dele sem (<). A última não tem
+    limite e pega o resto. O back (US13.T04) garante a ordem e a última sem limite.
+    """
+    for faixa in ranges:
+        limit = faixa.get("limit")
+        if limit is None:
+            return faixa["status"]
+        limit = Decimal(str(limit))
+        if value < limit or (faixa.get("includeLimit") and value == limit):
+            return faixa["status"]
+    raise ValueError(f"Faixas sem a última sem limite: {ranges}")
+
+
+@dataclass(frozen=True)
+class PointDensityResult:
+    value: Decimal             # pontos por factor ha
+    status: str
+    points: int                # numerador: pontos da fonte que tocam o imóvel
+    property_area_ha: Decimal  # denominador
+
+
+def calculate_point_density(property_area_ha: Decimal, points: int, factor: Decimal,
+                            ranges: list[dict]) -> PointDensityResult:
+    """POINT_DENSITY de um imóvel: pontos ÷ área declarada × fator, com o status pelas faixas.
+
+    A conta é a mesma do IFC, mas o status vem das faixas que o usuário cadastrou.
+    """
+    with localcontext() as ctx:
+        ctx.prec = ORACLE_PRECISION
+        value = round4(Decimal(points) / property_area_ha * factor)
+    return PointDensityResult(value, status_from_ranges(value, ranges), points, property_area_ha)

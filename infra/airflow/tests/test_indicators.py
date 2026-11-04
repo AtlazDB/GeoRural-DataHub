@@ -144,3 +144,45 @@ def test_count_fires_keeps_every_property_even_without_fires():
 
     assert list(counts.index) == ["A", "B", "C"]
     assert (counts == 0).all()
+
+
+# ---- indicadores cadastrados: faixas e densidade de pontos (US13.T06)
+
+RANGES = [
+    {"status": "CONFORME", "limit": 5, "includeLimit": True},
+    {"status": "ALERTA", "limit": 20, "includeLimit": False},
+    {"status": "CRITICO", "limit": None, "includeLimit": None},
+]
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("0", "CONFORME"),
+    ("5", "CONFORME"),        # includeLimit: o 5 fica nesta faixa
+    ("5.0001", "ALERTA"),
+    ("19.9999", "ALERTA"),
+    ("20", "CRITICO"),        # sem includeLimit: o 20 vai para a próxima
+    ("1000", "CRITICO"),
+])
+def test_status_from_ranges(value, expected):
+    assert indicators.status_from_ranges(Decimal(value), RANGES) == expected
+
+
+def test_status_from_ranges_with_a_single_range():
+    assert indicators.status_from_ranges(Decimal("42"), [{"status": "VALIDACAO"}]) == "VALIDACAO"
+
+
+def test_status_from_ranges_with_decimal_limit_from_json():
+    # o JSON pode trazer 10.5 como float: a comparação tem que ser exata
+    ranges = [{"status": "CONFORME", "limit": 10.5, "includeLimit": True}, {"status": "CRITICO"}]
+
+    assert indicators.status_from_ranges(Decimal("10.5"), ranges) == "CONFORME"
+    assert indicators.status_from_ranges(Decimal("10.5001"), ranges) == "CRITICO"
+
+
+def test_point_density():
+    # 2 / 100,5 x 1000 = 19,9005 -> abaixo de 20: ALERTA
+    result = indicators.calculate_point_density(Decimal("100.5"), 2, Decimal("1000"), RANGES)
+
+    assert result.value == Decimal("19.9005")
+    assert result.status == "ALERTA"
+    assert result.points == 2
