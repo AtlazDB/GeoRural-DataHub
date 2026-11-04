@@ -148,3 +148,48 @@ def test_tabelas_de_sempre_continuam_com_o_mesmo_conjunto():
 def test_conjunto_do_insumo_cabe_na_coluna():
     # dataset_versao.conjunto é VARCHAR2(60); fonte.sigla, VARCHAR2(12)
     assert len(gravacao.conjunto_da_carga("input_feature", "X" * 12)) <= 60
+
+
+# ---- indicadores depois da carga (US13.T10: irl_ifc.py no lugar do pkg_indicadores)
+
+class _ConexaoFalsa:
+    def __init__(self):
+        self.rollbacks = 0
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+def test_carga_recalcula_os_indicadores_do_conjunto(monkeypatch):
+    from georural import generico, irl_ifc
+
+    chamadas = []
+    monkeypatch.setattr(irl_ifc, "calculate_on",
+                        lambda con, indicadores, lote: chamadas.append((indicadores, lote)) or {i: 10 for i in indicadores})
+
+    assert generico._recalcular_indicadores(_ConexaoFalsa(), "imoveis_rurais", 500) == "IRL: 10, IFC: 10"
+    assert generico._recalcular_indicadores(_ConexaoFalsa(), "reserva_legal", 500) == "IRL: 10"
+    assert generico._recalcular_indicadores(_ConexaoFalsa(), "focos_calor", 500) == "IFC: 10"
+    assert chamadas == [(("IRL", "IFC"), 500), (("IRL",), 500), (("IFC",), 500)]
+
+
+def test_conjunto_sem_indicador_nao_recalcula(monkeypatch):
+    from georural import generico, irl_ifc
+
+    monkeypatch.setattr(irl_ifc, "calculate_on", lambda *_: pytest.fail("não devia calcular"))
+
+    assert generico._recalcular_indicadores(_ConexaoFalsa(), "municipios", 500) is None
+    assert generico._recalcular_indicadores(_ConexaoFalsa(), None, 500) is None
+
+
+def test_falha_nos_indicadores_nao_derruba_a_carga(monkeypatch):
+    from georural import generico, irl_ifc
+
+    def falha(*_):
+        raise irl_ifc.RuleError("Nenhuma regra ativa para o indicador IRL")
+
+    monkeypatch.setattr(irl_ifc, "calculate_on", falha)
+    con = _ConexaoFalsa()
+
+    assert generico._recalcular_indicadores(con, "reserva_legal", 500) == "falhou: Nenhuma regra ativa para o indicador IRL"
+    assert con.rollbacks == 1
