@@ -34,7 +34,7 @@ import numpy as np
 import oracledb
 import pandas as pd  # noqa: F401  (o desempate recebe um DataFrame)
 
-from georural import bucket, colunas, gravacao, leitura, regras, sdo
+from georural import bucket, colunas, gravacao, irl_ifc, leitura, regras, sdo
 from georural.banco import conectar
 from georural.config import Config
 from georural.tratada import Contagem, Tratada
@@ -70,11 +70,11 @@ SQL_CORRECAO = """
             :original, :corrigida)
 """
 
-# Indicadores recalculados quando o conjunto muda (pkg_indicadores).
+# Indicadores recalculados quando o conjunto muda (irl_ifc.py, no lugar do pkg_indicadores).
 INDICADORES = {
-    "imoveis_rurais": ("calcular_irl", "calcular_ifc"),
-    "reserva_legal": ("calcular_irl",),
-    "focos_calor": ("calcular_ifc",),
+    "imoveis_rurais": ("IRL", "IFC"),
+    "reserva_legal": ("IRL",),
+    "focos_calor": ("IFC",),
 }
 
 
@@ -223,7 +223,7 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
         # Nada mudou na Tratada: os indicadores continuam valendo.
         if resumo.inseridos or resumo.alterados or resumo.removidos:
             with _etapa(resumo, "indicadores"):
-                resumo.indicadores = _recalcular_indicadores(con, resumo.conjunto)
+                resumo.indicadores = _recalcular_indicadores(con, resumo.conjunto, cfg.tamanho_lote)
     log.info("Arquivo %s processado: %s", arquivo_id, resumo)
     log.info("Tempos do arquivo %s (s): %s", arquivo_id, _tempos(resumo))
     return resumo
@@ -388,21 +388,18 @@ def _gravar_correcoes(cur, execucao_id: int, geometria: regras.Regra | None, blo
     ])
 
 
-def _recalcular_indicadores(con, conjunto: str | None) -> str | None:
-    """Recalcula os indicadores do conjunto, numa transação própria: se falhar, a carga continua
-    valendo e o motivo fica no resumo da tarefa (dá para recalcular pela tela de indicadores)."""
-    funcoes = INDICADORES.get(conjunto or "")
-    if not funcoes:
+def _recalcular_indicadores(con, conjunto: str | None, lote: int) -> str | None:
+    """Recalcula os indicadores do conjunto (irl_ifc.py), depois da carga já confirmada: se falhar,
+    a carga continua valendo e o motivo fica no resumo da tarefa (dá para recalcular pela DAG
+    calcular_indicadores). A gravação é em lotes, então uma falha no meio deixa parte dos imóveis
+    com o valor novo; rodar de novo completa."""
+    indicadores = INDICADORES.get(conjunto or "")
+    if not indicadores:
         return None
-    resultado = []
     try:
-        with con.cursor() as cur:
-            for funcao in funcoes:
-                gravados = int(cur.callfunc(f"pkg_indicadores.{funcao}", oracledb.DB_TYPE_NUMBER, []))
-                resultado.append(f"{funcao}: {gravados}")
-        con.commit()
-    except oracledb.DatabaseError as e:
+        gravados = irl_ifc.calculate_on(con, indicadores, lote)
+    except (oracledb.DatabaseError, irl_ifc.RuleError) as e:
         con.rollback()
         log.warning("Indicadores não recalculados: %s", e)
         return f"falhou: {e}"[:300]
-    return ", ".join(resultado)
+    return ", ".join(f"{indicador}: {n}" for indicador, n in gravados.items())

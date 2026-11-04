@@ -211,14 +211,21 @@ def build_ifc(con, cod_imovel: str | None = None, referencia: datetime | None = 
     return ifc_rows(rule, properties, counts, int(versao_focos))
 
 
+def calculate_on(con, indicadores: tuple[str, ...], lote: int, cod_imovel: str | None = None,
+                 referencia: datetime | None = None) -> dict:
+    """Calcula e grava os indicadores pedidos numa conexão já aberta (a carga do generico.py
+    usa a dela). Devolve quantos imóveis cada um gravou."""
+    resultado = {}
+    if "IRL" in indicadores:
+        resultado["IRL"] = save_rows(con, build_irl(con, cod_imovel), lote)
+    if "IFC" in indicadores:
+        resultado["IFC"] = save_rows(con, build_ifc(con, cod_imovel, referencia), lote)
+    log.info("Indicadores gravados: %s", resultado)
+    return resultado
+
+
 def calculate(cfg: Config, indicadores: tuple[str, ...] = ("IRL", "IFC"), cod_imovel: str | None = None,
               referencia: datetime | None = None) -> dict:
     """Calcula os indicadores pedidos e devolve quantos imóveis cada um gravou (para o XCom)."""
-    resultado = {}
     with conectar(cfg) as con:
-        if "IRL" in indicadores:
-            resultado["IRL"] = save_rows(con, build_irl(con, cod_imovel), cfg.tamanho_lote)
-        if "IFC" in indicadores:
-            resultado["IFC"] = save_rows(con, build_ifc(con, cod_imovel, referencia), cfg.tamanho_lote)
-    log.info("Indicadores gravados: %s", resultado)
-    return resultado
+        return calculate_on(con, indicadores, cfg.tamanho_lote, cod_imovel, referencia)
