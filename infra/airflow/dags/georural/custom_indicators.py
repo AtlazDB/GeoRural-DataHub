@@ -1,13 +1,19 @@
-"""Indicadores cadastrados pelo usuário (US13.T06): lê o indicator_definition, conta os pontos
-da fonte (input_feature) em cada imóvel, calcula com o indicators.py e grava em indicator_result.
+"""Indicadores cadastrados pelo usuário (US13.T06 e T07): lê o indicator_definition, cruza as feições
+da fonte (input_feature) com cada imóvel, calcula com o indicators.py e grava em indicator_result.
 
-Os pontos vêm da fonte que o usuário escolheu no cadastro. O denominador é a área declarada do
-imóvel (imovel_rural.area_ha), como no IRL e no IFC. Imóvel sem ponto também ganha resultado
-(valor 0), para a tela mostrar o status dele.
+Dois modelos:
+- POINT_DENSITY (T06): pontos da fonte que tocam o imóvel ÷ área declarada (imovel_rural.area_ha)
+  × fator, como o IFC.
+- AREA_COVERAGE (T07): área do imóvel coberta pelos polígonos da fonte ÷ área do contorno × 100. Os
+  dois lados são medidos do mesmo jeito (área geodésica do polígono), então o valor fica entre 0 e 100.
 
-Só a geometria dos imóveis que podem ter ponto sai do banco: o SDO_FILTER (índice espacial, só o
-retângulo) separa os candidatos, e quem decide se o ponto toca o imóvel é o Shapely
-(indicators.count_fires), como nas regras da carga. Os outros imóveis entram com 0.
+Filtro opcional nos dois: parameters.category, que compara com input_feature.categoria (ex.: só os
+focos de um satélite). O valor vai como parâmetro do SQL, nunca concatenado.
+
+Imóvel sem nenhuma feição também ganha resultado (valor 0), para a tela mostrar o status dele.
+
+Só a geometria dos imóveis que podem tocar a fonte sai do banco: o SDO_FILTER (índice espacial, só o
+retângulo) separa os candidatos, e quem decide é o Shapely, como nas regras da carga.
 
 A gravação é em lotes, com commit por lote (o undo do Autonomous é limitado). Se a execução cair
 no meio, rodar de novo completa: o MERGE não duplica.
@@ -29,8 +35,9 @@ from georural.config import Config
 log = logging.getLogger(__name__)
 
 POINT_DENSITY = "POINT_DENSITY"
-# get_gtype() do SDO_GEOMETRY: 1 = ponto, 5 = multiponto
-_POINT_TYPES = {1, 5}
+AREA_COVERAGE = "AREA_COVERAGE"
+# get_gtype() do SDO_GEOMETRY: 1 = ponto, 5 = multiponto, 3 = polígono, 7 = multipolígono
+_TIPOS = {POINT_DENSITY: ({1, 5}, "pontos"), AREA_COVERAGE: ({3, 7}, "polígonos")}
 
 SQL_DEFINITION = """
     SELECT fonte_id, calculation_model, parameters, ranges, active
@@ -38,20 +45,24 @@ SQL_DEFINITION = """
      WHERE code = :code"""
 
 # A fonte de cada linha vem pela versão: dataset_versao -> execucao -> arquivo_bruto.
-SQL_POINTS = """
-    SELECT f.dataset_versao_id, f.geometria.get_gtype(), SDO_UTIL.TO_WKBGEOMETRY(f.geometria)
-      FROM input_feature f
+# Sem categoria (NULL), o filtro não corta nada.
+_DA_FONTE = """
       JOIN dataset_versao dv ON dv.id = f.dataset_versao_id
       JOIN execucao e        ON e.id  = dv.execucao_id
       JOIN arquivo_bruto a   ON a.id  = e.arquivo_bruto_id
-     WHERE a.fonte_id = :fonte"""
+     WHERE a.fonte_id = :fonte
+       AND (:categoria IS NULL OR f.categoria = :categoria)"""
+
+SQL_FEATURES = """
+    SELECT f.dataset_versao_id, f.geometria.get_gtype(), SDO_UTIL.TO_WKBGEOMETRY(f.geometria)
+      FROM input_feature f""" + _DA_FONTE
 
 SQL_PROPERTIES = """
     SELECT cod_imovel, area_ha, dataset_versao_id
       FROM imovel_rural
      WHERE area_ha > 0"""
 
-# Os pontos guiam o índice espacial dos imóveis (como o hint ORDERED do pkg_indicadores).
+# As feições guiam o índice espacial dos imóveis (como o hint ORDERED do pkg_indicadores).
 SQL_CANDIDATES = """
     SELECT i.cod_imovel, SDO_UTIL.TO_WKBGEOMETRY(i.geometria)
       FROM imovel_rural i
@@ -59,11 +70,7 @@ SQL_CANDIDATES = """
        AND i.ROWID IN (
            SELECT /*+ ORDERED */ c.ROWID
              FROM input_feature f
-             JOIN dataset_versao dv ON dv.id = f.dataset_versao_id
-             JOIN execucao e        ON e.id  = dv.execucao_id
-             JOIN arquivo_bruto a   ON a.id  = e.arquivo_bruto_id
-             JOIN imovel_rural c    ON SDO_FILTER(c.geometria, f.geometria) = 'TRUE'
-            WHERE a.fonte_id = :fonte)"""
+             JOIN imovel_rural c ON SDO_FILTER(c.geometria, f.geometria) = 'TRUE'""" + _DA_FONTE + ")"
 
 SQL_MERGE = """
     MERGE INTO indicator_result r
@@ -83,7 +90,7 @@ SQL_MERGE = """
 
 
 class IndicatorError(Exception):
-    """O indicador não pode ser calculado (não existe, está desativado, fonte sem pontos...). A
+    """O indicador não pode ser calculado (não existe, está desativado, fonte sem dados...). A
     mensagem vai para o log da DAG."""
 
 
@@ -112,29 +119,34 @@ def load_definition(cur, code: str) -> dict:
     fonte_id, model, parameters, ranges, active = linha
     if not active:
         raise IndicatorError(f"O indicador {code} está desativado.")
-    if model != POINT_DENSITY:
-        raise IndicatorError(f"Modelo {model} ainda não é calculado (só {POINT_DENSITY}).")
+    if model not in _TIPOS:
+        raise IndicatorError(f"Modelo de cálculo desconhecido: {model}.")
+    parameters = _from_json(parameters) or {}
     return {
         "code": code,
         "fonte_id": int(fonte_id),
         "model": model,
-        "parameters": _from_json(parameters),
+        "parameters": parameters,
+        "category": parameters.get("category") or None,
         "ranges": _from_json(ranges),
     }
 
 
-def load_points(cur, fonte_id: int) -> tuple[gpd.GeoDataFrame, int]:
-    """Os pontos da fonte e a versão usada (a mais nova entre as linhas da fonte)."""
-    cur.execute(SQL_POINTS, fonte=fonte_id)
+def load_features(cur, fonte_id: int, model: str, category: str | None = None) -> tuple[gpd.GeoDataFrame, int]:
+    """As feições da fonte (só as da categoria, se houver) e a versão usada (a mais nova entre as
+    linhas). O tipo tem que combinar com o modelo: pontos na densidade, polígonos na cobertura."""
+    cur.execute(SQL_FEATURES, fonte=fonte_id, categoria=category)
     linhas = cur.fetchall()
     if not linhas:
-        raise IndicatorError(f"A fonte {fonte_id} não tem dados no insumo genérico (input_feature).")
+        filtro = f" com a categoria {category!r}" if category else ""
+        raise IndicatorError(f"A fonte {fonte_id} não tem dados{filtro} no insumo genérico (input_feature).")
+    esperados, nome = _TIPOS[model]
     tipos = {int(gtype) for _, gtype, _ in linhas}
-    if not tipos <= _POINT_TYPES:
-        raise IndicatorError(f"A fonte {fonte_id} tem geometrias que não são pontos (tipos {sorted(tipos)}).")
+    if not tipos <= esperados:
+        raise IndicatorError(f"{model} precisa de {nome}, e a fonte {fonte_id} tem outros tipos ({sorted(tipos)}).")
     versao = max(int(versao) for versao, _, _ in linhas)
-    pontos = gpd.GeoDataFrame(geometry=shapely.from_wkb([wkb for _, _, wkb in linhas]), crs="EPSG:4326")
-    return pontos, versao
+    feicoes = gpd.GeoDataFrame(geometry=shapely.from_wkb([wkb for _, _, wkb in linhas]), crs="EPSG:4326")
+    return feicoes, versao
 
 
 def load_properties(cur) -> pd.DataFrame:
@@ -143,15 +155,28 @@ def load_properties(cur) -> pd.DataFrame:
     return pd.DataFrame(cur.fetchall(), columns=["cod_imovel", "area_ha", "versao_imovel_id"])
 
 
-def load_candidates(cur, fonte_id: int) -> gpd.GeoDataFrame:
-    """A geometria só dos imóveis que podem ter ponto da fonte (retângulo encosta num ponto)."""
-    cur.execute(SQL_CANDIDATES, fonte=fonte_id)
+def load_candidates(cur, fonte_id: int, category: str | None = None) -> gpd.GeoDataFrame:
+    """A geometria só dos imóveis que podem tocar a fonte (o retângulo encosta numa feição)."""
+    cur.execute(SQL_CANDIDATES, fonte=fonte_id, categoria=category)
     linhas = cur.fetchall()
     return gpd.GeoDataFrame(
         {"cod_imovel": [cod for cod, _ in linhas]},
         geometry=shapely.from_wkb([wkb for _, wkb in linhas]),
         crs="EPSG:4326",
     )
+
+
+def _row(code, imovel, versao, value, status, numerator, area) -> dict:
+    return {
+        "code": code,
+        "cod_imovel": imovel.cod_imovel,
+        "versao": versao,
+        "versao_imovel": int(imovel.versao_imovel_id),
+        "value": value,
+        "status": status,
+        "numerator": numerator,
+        "area": area,
+    }
 
 
 def point_density_rows(code: str, properties: pd.DataFrame, counts: pd.Series, points_version: int,
@@ -166,16 +191,30 @@ def point_density_rows(code: str, properties: pd.DataFrame, counts: pd.Series, p
     for imovel in properties.itertuples(index=False):
         points = int(counts.get(imovel.cod_imovel, 0))
         result = indicators.calculate_point_density(imovel.area_ha, points, factor, ranges)
-        rows.append({
-            "code": code,
-            "cod_imovel": imovel.cod_imovel,
-            "versao": points_version,
-            "versao_imovel": int(imovel.versao_imovel_id),
-            "value": result.value,
-            "status": result.status,
-            "numerator": Decimal(points),
-            "area": imovel.area_ha,
-        })
+        rows.append(_row(code, imovel, points_version, result.value, result.status, Decimal(points), imovel.area_ha))
+    return rows
+
+
+def area_coverage_rows(code: str, properties: pd.DataFrame, coverage: pd.DataFrame, version: int,
+                       ranges: list[dict]) -> list[dict]:
+    """Uma linha de indicator_result por imóvel, pronta para o MERGE.
+
+    coverage: cod_imovel, property_ha e covered_ha dos imóveis que encostam na fonte
+    (indicators.coverage_by_property). Quem não aparece fica com 0% e área do contorno vazia: ela só
+    é medida para quem encosta, para não trazer a geometria de todos os imóveis do banco.
+    """
+    medidos = {c.cod_imovel: c for c in coverage.itertuples(index=False)}
+    rows = []
+    for imovel in properties.itertuples(index=False):
+        medido = medidos.get(imovel.cod_imovel)
+        if medido is None:
+            value = Decimal("0.0000")
+            rows.append(_row(code, imovel, version, value, indicators.status_from_ranges(value, ranges),
+                             Decimal("0.0000"), None))
+            continue
+        result = indicators.calculate_area_coverage(medido.property_ha, medido.covered_ha, ranges)
+        rows.append(_row(code, imovel, version, result.value, result.status, result.covered_ha,
+                         result.property_area_ha))
     return rows
 
 
@@ -194,15 +233,23 @@ def calculate(cfg: Config, code: str) -> dict:
         with con.cursor() as cur:
             cur.outputtypehandler = _exact_types
             definition = load_definition(cur, code)
-            pontos, versao = load_points(cur, definition["fonte_id"])
+            fonte, model, category = definition["fonte_id"], definition["model"], definition["category"]
+            feicoes, versao = load_features(cur, fonte, model, category)
             properties = load_properties(cur)
-            candidates = load_candidates(cur, definition["fonte_id"])
+            candidates = load_candidates(cur, fonte, category)
 
-        counts = indicators.count_fires(candidates, pontos)
-        factor = Decimal(str(definition["parameters"].get("factor", 1)))
-        rows = point_density_rows(code, properties, counts, versao, factor, definition["ranges"])
+        if model == POINT_DENSITY:
+            counts = indicators.count_fires(candidates, feicoes)
+            factor = Decimal(str(definition["parameters"].get("factor", 1)))
+            rows = point_density_rows(code, properties, counts, versao, factor, definition["ranges"])
+            tocados = int((counts > 0).sum())
+        else:
+            coverage = indicators.coverage_by_property(candidates, feicoes)
+            rows = area_coverage_rows(code, properties, coverage, versao, definition["ranges"])
+            tocados = int((coverage["covered_ha"] > 0).sum())
         gravados = save_rows(con, rows, cfg.tamanho_lote)
 
-    com_pontos = int((counts > 0).sum())
-    log.info("%s: %d imóveis gravados (%d com ponto), versão da fonte %d", code, gravados, com_pontos, versao)
-    return {"code": code, "imoveis": gravados, "com_pontos": com_pontos, "versao_fonte": versao}
+    log.info("%s (%s%s): %d imóveis gravados (%d tocados pela fonte), versão da fonte %d", code, model,
+             f", categoria {category!r}" if category else "", gravados, tocados, versao)
+    return {"code": code, "model": model, "category": category, "imoveis": gravados,
+            "tocados": tocados, "versao_fonte": versao}

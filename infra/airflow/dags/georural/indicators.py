@@ -17,6 +17,8 @@ from decimal import ROUND_HALF_UP, Decimal, localcontext
 
 import geopandas as gpd
 import pandas as pd
+import shapely
+from pyproj import Geod
 
 FOUR_PLACES = Decimal("0.0001")
 # NUMBER do Oracle guarda até 38 dígitos; o Decimal padrão do Python, 28.
@@ -148,3 +150,55 @@ def calculate_point_density(property_area_ha: Decimal, points: int, factor: Deci
         ctx.prec = ORACLE_PRECISION
         value = round4(Decimal(points) / property_area_ha * factor)
     return PointDensityResult(value, status_from_ranges(value, ranges), points, property_area_ha)
+
+
+# Área geodésica no elipsoide do SIRGAS 2000 (como o regras.area_m2 e o SDO_AREA no SRID 4326).
+_GEOD = Geod(ellps="GRS80")
+
+
+def area_ha(geometria) -> Decimal:
+    """Área geodésica da parte poligonal da geometria, em hectares e 4 casas. Linhas e pontos que
+    sobram de uma interseção (imóveis que só encostam) não têm área e contam 0."""
+    poligonos = [p for p in shapely.get_parts(geometria) if p.geom_type in ("Polygon", "MultiPolygon")]
+    m2 = sum(abs(_GEOD.geometry_area_perimeter(p)[0]) for p in poligonos)
+    return round4(Decimal(str(m2)) / 10000)
+
+
+def coverage_by_property(properties: gpd.GeoDataFrame, features: gpd.GeoDataFrame) -> pd.DataFrame:
+    """Área do contorno e área coberta pela fonte em cada imóvel que encosta em alguma feição.
+
+    properties: cod_imovel + geometry. features: geometry (polígonos da fonte, já filtrados).
+    A cobertura é a interseção do imóvel com a UNIÃO das feições que o tocam: duas feições
+    sobrepostas não contam a mesma área duas vezes. Geometria inválida passa pelo make_valid
+    antes (a interseção do GEOS falha com anel que se cruza). Imóvel sem feição não aparece.
+    Devolve cod_imovel, property_ha e covered_ha.
+    """
+    pares = gpd.sjoin(properties[["cod_imovel", "geometry"]], features[["geometry"]],
+                      predicate="intersects", how="inner")
+    linhas = []
+    for cod, grupo in pares.groupby("cod_imovel"):
+        imovel = shapely.make_valid(grupo.geometry.iloc[0])
+        feicoes = shapely.make_valid(features.geometry.loc[grupo["index_right"]].values)
+        coberta = shapely.intersection(imovel, shapely.union_all(feicoes))
+        linhas.append((cod, area_ha(imovel), area_ha(coberta)))
+    return pd.DataFrame(linhas, columns=["cod_imovel", "property_ha", "covered_ha"])
+
+
+@dataclass(frozen=True)
+class AreaCoverageResult:
+    value: Decimal             # % da área do imóvel coberta pela fonte
+    status: str
+    covered_ha: Decimal        # numerador: área da interseção com a fonte (ha)
+    property_area_ha: Decimal  # denominador: área do contorno do imóvel (ha), medida como o numerador
+
+
+def calculate_area_coverage(property_area_ha: Decimal, covered_ha: Decimal, ranges: list[dict]) -> AreaCoverageResult:
+    """AREA_COVERAGE de um imóvel: área coberta ÷ área do contorno × 100, com o status pelas faixas.
+
+    Os dois lados são medidos do mesmo jeito (área geodésica do polígono), então o valor fica
+    entre 0 e 100. Não usa a área declarada: ela não é a área que a interseção mede.
+    """
+    with localcontext() as ctx:
+        ctx.prec = ORACLE_PRECISION
+        value = round4(covered_ha / property_area_ha * 100) if property_area_ha > 0 else Decimal("0.0000")
+    return AreaCoverageResult(value, status_from_ranges(value, ranges), covered_ha, property_area_ha)
