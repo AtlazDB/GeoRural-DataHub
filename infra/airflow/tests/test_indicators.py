@@ -186,3 +186,71 @@ def test_point_density():
     assert result.value == Decimal("19.9005")
     assert result.status == "ALERTA"
     assert result.points == 2
+
+
+# ---- cobertura de área (US13.T07)
+
+def _imovel(*caixas):
+    return gpd.GeoDataFrame({"cod_imovel": [c for c, _ in caixas]}, geometry=[g for _, g in caixas], crs="EPSG:4326")
+
+
+def _poligonos(*geometrias):
+    return gpd.GeoDataFrame(geometry=list(geometrias), crs="EPSG:4326")
+
+
+def _cobertura(imoveis, feicoes):
+    tabela = indicators.coverage_by_property(imoveis, feicoes)
+    return {c.cod_imovel: c for c in tabela.itertuples(index=False)}
+
+
+def test_coverage_of_half_the_property_is_50_percent():
+    # metade oeste do quadrado: a área geodésica de um retângulo lat/lon é proporcional à largura
+    cob = _cobertura(_imovel(("A", box(0, 0, 0.1, 0.1))), _poligonos(box(0, 0, 0.05, 0.1)))["A"]
+
+    result = indicators.calculate_area_coverage(cob.property_ha, cob.covered_ha, RANGES)
+
+    assert abs(result.value - Decimal("50")) <= Decimal("0.0001")
+    assert result.status == "CRITICO"   # 50 > 20: a última faixa
+
+
+def test_overlapping_features_do_not_count_twice():
+    duas = _poligonos(box(0, 0, 0.05, 0.1), box(0, 0, 0.05, 0.1))   # a mesma metade, duas vezes
+    uma = _poligonos(box(0, 0, 0.05, 0.1))
+    imovel = _imovel(("A", box(0, 0, 0.1, 0.1)))
+
+    assert _cobertura(imovel, duas)["A"].covered_ha == _cobertura(imovel, uma)["A"].covered_ha
+
+
+def test_feature_bigger_than_the_property_covers_100_percent():
+    cob = _cobertura(_imovel(("A", box(0, 0, 0.1, 0.1))), _poligonos(box(-1, -1, 1, 1)))["A"]
+
+    assert cob.covered_ha == cob.property_ha
+    assert indicators.calculate_area_coverage(cob.property_ha, cob.covered_ha, RANGES).value == Decimal("100.0000")
+
+
+def test_feature_that_only_touches_the_border_covers_nothing():
+    # encosta na borda leste: a interseção é uma linha, sem área
+    cob = _cobertura(_imovel(("A", box(0, 0, 0.1, 0.1))), _poligonos(box(0.1, 0, 0.2, 0.1)))["A"]
+
+    assert cob.covered_ha == 0
+
+
+def test_property_without_features_does_not_appear():
+    tabela = indicators.coverage_by_property(_imovel(("A", box(0, 0, 0.1, 0.1)), ("B", box(5, 5, 5.1, 5.1))),
+                                             _poligonos(box(0, 0, 0.05, 0.1)))
+
+    assert list(tabela["cod_imovel"]) == ["A"]
+
+
+def test_invalid_feature_is_fixed_before_the_intersection():
+    from shapely.geometry import Polygon
+    gravata = Polygon([(0, 0), (0.1, 0.1), (0.1, 0), (0, 0.1), (0, 0)])   # anel que se cruza
+
+    cob = _cobertura(_imovel(("A", box(0, 0, 0.1, 0.1))), _poligonos(gravata))["A"]
+
+    assert 0 < cob.covered_ha < cob.property_ha
+
+
+def test_area_ha_is_geodesic_and_in_hectares():
+    # 0,01° x 0,01° no equador: ~1,11 km x 1,11 km = ~123 ha
+    assert Decimal("122") < indicators.area_ha(box(0, 0, 0.01, 0.01)) < Decimal("124")
