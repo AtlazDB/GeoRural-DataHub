@@ -256,7 +256,7 @@ class Tabela:
         import pandas as pd
         vazio = [None] * len(self)
         return pd.DataFrame({c: [texto(v) for v in self.atributos.get(c, vazio)] for c in colunas},
-                            columns=list(colunas), dtype="object")
+                            columns=list(colunas), index=range(len(self)), dtype="object")
 
     def registro(self, posicao: int) -> dict:
         return {nome: valores[posicao] for nome, valores in self.atributos.items()}
