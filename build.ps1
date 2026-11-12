@@ -30,10 +30,31 @@ function Start-Janela($titulo, $pasta, $comando) {
 }
 
 # --- Conferências antes de subir qualquer coisa
+# Docker Desktop fechado: abre e espera ficar pronto (até 3 minutos).
 docker info *> $null
 if ($LASTEXITCODE -ne 0) {
-    Write-Error 'O Docker não está rodando. Abra o Docker Desktop e tente de novo.'
-    exit 1
+    $dockerDesktop = @(
+        "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
+        "$env:LOCALAPPDATA\Programs\DockerDesktop\Docker Desktop.exe"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $dockerDesktop) {
+        Write-Error 'O Docker não está rodando e não achei o Docker Desktop. Abra ele e tente de novo.'
+        exit 1
+    }
+    Write-Host 'Abrindo o Docker Desktop...' -NoNewline -ForegroundColor Cyan
+    Start-Process $dockerDesktop
+    $limite = (Get-Date).AddMinutes(3)
+    do {
+        Start-Sleep -Seconds 3
+        Write-Host '.' -NoNewline
+        docker info *> $null
+    } while ($LASTEXITCODE -ne 0 -and (Get-Date) -lt $limite)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ''
+        Write-Error 'O Docker Desktop não ficou pronto em 3 minutos.'
+        exit 1
+    }
+    Write-Host ' pronto!' -ForegroundColor Green
 }
 if (-not (Test-Path (Join-Path $PastaBack 'pom.xml'))) {
     Write-Error "Back-end não encontrado em $PastaBack. Rode 'git submodule update --init' ou ajuste o build.local.ps1."
