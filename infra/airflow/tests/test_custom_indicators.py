@@ -2,6 +2,7 @@
 e guarda o que seria gravado."""
 
 import sys
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -205,6 +206,161 @@ def test_category_goes_as_a_sql_parameter():
     assert cur.binds["categoria"] == "AQUA_M-T"
     assert "AQUA_M-T" not in cur.sql  # nada concatenado
     assert ":categoria IS NULL OR f.categoria = :categoria" in cur.sql
+
+
+# ---- filtro por data (parameters.since, IDesmat)
+
+def test_load_definition_reads_since_as_a_date():
+    cur = CursorFalso({"indicator_definition": [(3, "AREA_COVERAGE", {"since": "2008-07-22"}, RANGES, 1)]})
+
+    definition = custom_indicators.load_definition(cur, "DESM08")
+
+    assert definition["since"] == date(2008, 7, 22)
+
+
+def test_load_definition_without_since_does_not_filter():
+    definition = custom_indicators.load_definition(_definition(), "DFOCO")
+
+    assert definition["since"] is None
+
+
+def test_load_definition_refuses_an_invalid_since():
+    cur = CursorFalso({"indicator_definition": [(3, "AREA_COVERAGE", {"since": "22/07/2008"}, RANGES, 1)]})
+
+    with pytest.raises(IndicatorError, match="data inválida"):
+        custom_indicators.load_definition(cur, "DESM08")
+
+
+def test_since_goes_as_a_sql_parameter_in_both_queries():
+    class CursorQueGuarda(CursorFalso):
+        def __init__(self, respostas):
+            super().__init__(respostas)
+            self.chamadas = []
+
+        def execute(self, sql, **binds):
+            self.chamadas.append((sql, binds))
+            super().execute(sql, **binds)
+
+    feicoes = CursorQueGuarda({"input_feature": [(10, 3, _wkb_caixa(0, 0, 1, 1))]})
+    imoveis = CursorQueGuarda({})
+
+    custom_indicators.load_features(feicoes, 3, "AREA_COVERAGE", since=date(2008, 7, 22))
+    custom_indicators.load_candidates(imoveis, 3, since=date(2008, 7, 22))
+
+    chamadas = feicoes.chamadas + imoveis.chamadas
+    assert len(chamadas) == 2
+    for sql, binds in chamadas:
+        assert binds["desde"] == date(2008, 7, 22)
+        assert ":desde IS NULL OR f.data_referencia >= :desde" in sql
+
+
+def test_without_since_the_date_parameter_goes_empty():
+    class CursorQueGuarda(CursorFalso):
+        def execute(self, sql, **binds):
+            self.binds = binds
+            super().execute(sql, **binds)
+
+    cur = CursorQueGuarda({"input_feature": [(10, 1, _wkb_ponto(0, 0))]})
+
+    custom_indicators.load_features(cur, 3, "POINT_DENSITY")
+
+    assert cur.binds["desde"] is None
+
+
+# ---- várias fontes (parameters.extraSources, ISAP)
+
+def test_load_definition_without_extra_sources_uses_only_the_main_one():
+    definition = custom_indicators.load_definition(_definition(), "DFOCO")
+
+    assert definition["sources"] == [3]
+
+
+def test_load_definition_adds_extra_sources_without_repeating():
+    cur = CursorFalso({"indicator_definition": [
+        (3, "AREA_COVERAGE", {"extraSources": [12, "15", 3, 12]}, RANGES, 1)]})
+
+    definition = custom_indicators.load_definition(cur, "ISAP")
+
+    assert definition["sources"] == [3, 12, 15]
+
+
+def test_load_definition_refuses_invalid_extra_sources():
+    for extras in ("12,15", [12, "UC"]):
+        cur = CursorFalso({"indicator_definition": [(3, "AREA_COVERAGE", {"extraSources": extras}, RANGES, 1)]})
+        with pytest.raises(IndicatorError, match="extraSources"):
+            custom_indicators.load_definition(cur, "ISAP")
+
+
+def test_each_source_goes_as_its_own_sql_parameter():
+    class CursorQueGuarda(CursorFalso):
+        def __init__(self, respostas):
+            super().__init__(respostas)
+            self.chamadas = []
+
+        def execute(self, sql, **binds):
+            self.chamadas.append((sql, binds))
+            super().execute(sql, **binds)
+
+    feicoes = CursorQueGuarda({"input_feature": [(10, 3, _wkb_caixa(0, 0, 1, 1)), (14, 7, _wkb_caixa(2, 2, 3, 3))]})
+    imoveis = CursorQueGuarda({})
+
+    poligonos, versao = custom_indicators.load_features(feicoes, [3, 12, 15], "AREA_COVERAGE")
+    custom_indicators.load_candidates(imoveis, [3, 12, 15])
+
+    assert len(poligonos) == 2
+    assert versao == 14  # a mais nova entre as fontes
+    for sql, binds in feicoes.chamadas + imoveis.chamadas:
+        assert "a.fonte_id IN (:fonte0, :fonte1, :fonte2)" in sql
+        assert (binds["fonte0"], binds["fonte1"], binds["fonte2"]) == (3, 12, 15)
+
+
+def test_message_names_all_the_sources_without_data():
+    with pytest.raises(IndicatorError, match="As fontes 3, 12 não têm dados"):
+        custom_indicators.load_features(CursorFalso(), [3, 12], "AREA_COVERAGE")
+
+
+# ---- cobertura dentro de uma camada base (BASE_COVERAGE, IAPP)
+
+def test_load_definition_reads_the_base_sources():
+    cur = CursorFalso({"indicator_definition": [
+        (3, "BASE_COVERAGE", {"baseSources": [20, "21", 20]}, RANGES, 1)]})
+
+    definition = custom_indicators.load_definition(cur, "IAPP")
+
+    assert definition["model"] == "BASE_COVERAGE"
+    assert definition["sources"] == [3]
+    assert definition["base_sources"] == [20, 21]
+
+
+def test_base_coverage_requires_valid_base_sources():
+    for parameters in ({}, {"baseSources": []}, {"baseSources": 20}, {"baseSources": ["APP"]}):
+        cur = CursorFalso({"indicator_definition": [(3, "BASE_COVERAGE", parameters, RANGES, 1)]})
+        with pytest.raises(IndicatorError, match="baseSources"):
+            custom_indicators.load_definition(cur, "IAPP")
+
+
+def test_other_models_ignore_base_sources():
+    definition = custom_indicators.load_definition(_definition(), "DFOCO")
+
+    assert definition["base_sources"] == []
+
+
+def test_base_coverage_rows_only_for_properties_with_app():
+    coverage = pd.DataFrame({"cod_imovel": ["PR-1"], "base_ha": [Decimal("10")], "covered_ha": [Decimal("8")]})
+
+    rows = custom_indicators.base_coverage_rows("IAPP", _properties(), coverage, 42, RANGES)
+
+    assert len(rows) == 1
+    assert rows[0]["cod_imovel"] == "PR-1"
+    assert rows[0]["value"] == Decimal("80.0000")
+    assert rows[0]["numerator"] == Decimal("8")    # APP com vegetação
+    assert rows[0]["area"] == Decimal("10")        # APP total (o passivo é 10 − 8 = 2 ha)
+    assert rows[0]["status"] == "CRITICO"
+
+
+def test_message_says_which_date_had_no_data():
+    with pytest.raises(IndicatorError, match="com a categoria 'MATA' a partir de 22/07/2008"):
+        custom_indicators.load_features(CursorFalso(), 3, "AREA_COVERAGE", "MATA", date(2008, 7, 22))
 
 
 # ---- cobertura de área (US13.T07)

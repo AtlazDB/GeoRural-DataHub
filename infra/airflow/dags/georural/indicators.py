@@ -16,6 +16,7 @@ from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 import shapely
 from pyproj import Geod
@@ -164,6 +165,33 @@ def area_ha(geometria) -> Decimal:
     return round4(Decimal(str(m2)) / 10000)
 
 
+def _poligonal(geometria):
+    """Só a parte de área da geometria (Polygon/MultiPolygon). Linhas e pontos viram nada."""
+    if geometria.geom_type in ("Polygon", "MultiPolygon"):
+        return geometria
+    partes = [p for p in shapely.get_parts(geometria) if p.geom_type in ("Polygon", "MultiPolygon")]
+    return shapely.union_all(partes) if partes else shapely.Polygon()
+
+
+def _validas(geometrias):
+    """make_valid + só a parte de área. O make_valid de um polígono inválido pode devolver uma
+    GeometryCollection com polígonos e linhas; as linhas não têm área e só atrapalham a união."""
+    return np.array([_poligonal(g) for g in np.atleast_1d(shapely.make_valid(geometrias))], dtype=object)
+
+
+# Grade de ~0,1 mm (em graus) em que o GEOS arredonda os vértices na união e na interseção.
+_GRADE_GRAUS = 1e-9
+
+
+def _intersecao_com_uniao(alvo, partes):
+    """alvo ∩ união(partes), sempre na grade fixa (snap rounding do GEOS), que é a sobreposição
+    robusta. Sem a grade, camadas com bordas quase iguais (APP e vegetação do CAR) ou falhavam com
+    "non-noded intersection" (TD2VA, 11/11) ou, pior, davam área errada SEM erro: 48,49 ha em vez
+    de 50,23 num imóvel de São Mateus do Sul (12/11). A grade muda a área bem abaixo das 4 casas."""
+    return shapely.intersection(alvo, shapely.union_all(partes, grid_size=_GRADE_GRAUS),
+                                grid_size=_GRADE_GRAUS)
+
+
 def coverage_by_property(properties: gpd.GeoDataFrame, features: gpd.GeoDataFrame) -> pd.DataFrame:
     """Área do contorno e área coberta pela fonte em cada imóvel que encosta em alguma feição.
 
@@ -177,11 +205,46 @@ def coverage_by_property(properties: gpd.GeoDataFrame, features: gpd.GeoDataFram
                       predicate="intersects", how="inner")
     linhas = []
     for cod, grupo in pares.groupby("cod_imovel"):
-        imovel = shapely.make_valid(grupo.geometry.iloc[0])
-        feicoes = shapely.make_valid(features.geometry.loc[grupo["index_right"]].values)
-        coberta = shapely.intersection(imovel, shapely.union_all(feicoes))
-        linhas.append((cod, area_ha(imovel), area_ha(coberta)))
+        imovel = _validas(grupo.geometry.iloc[0])[0]
+        feicoes = _validas(features.geometry.loc[grupo["index_right"]].values)
+        coberta = _intersecao_com_uniao(imovel, feicoes)
+        imovel_ha = area_ha(imovel)
+        # A interseção medida pode passar 1–2 m² do contorno (arredondamento): no máximo 100%.
+        linhas.append((cod, imovel_ha, min(area_ha(coberta), imovel_ha)))
     return pd.DataFrame(linhas, columns=["cod_imovel", "property_ha", "covered_ha"])
+
+
+def base_coverage_by_property(properties: gpd.GeoDataFrame, base: gpd.GeoDataFrame,
+                              cover: gpd.GeoDataFrame) -> pd.DataFrame:
+    """Para cada imóvel que encosta na camada base (ex.: APP): a área da base dentro do imóvel e
+    quanto dela está coberto pela outra camada (ex.: vegetação nativa). É o IAPP.
+
+    properties: cod_imovel + geometry. base e cover: geometry (polígonos, já filtrados).
+    base_ha = imóvel ∩ união da base; covered_ha = (imóvel ∩ base) ∩ união da cobertura. Sobreposição
+    dentro de uma camada não conta duas vezes. Imóvel cuja base dentro dele não tem área (só
+    encosta na borda) não aparece: sem APP não há o que medir.
+    Devolve cod_imovel, base_ha e covered_ha.
+    """
+    pares = gpd.sjoin(properties[["cod_imovel", "geometry"]], base[["geometry"]],
+                      predicate="intersects", how="inner")
+    cobertura = _validas(cover.geometry.values) if len(cover) else None
+    indice = shapely.STRtree(cobertura) if cobertura is not None else None
+    linhas = []
+    for cod, grupo in pares.groupby("cod_imovel"):
+        imovel = _validas(grupo.geometry.iloc[0])[0]
+        partes_base = _validas(base.geometry.loc[grupo["index_right"]].values)
+        base_no_imovel = _poligonal(_intersecao_com_uniao(imovel, partes_base))
+        base_ha = area_ha(base_no_imovel)
+        if base_ha <= 0:
+            continue
+        coberta_ha = Decimal("0.0000")
+        if indice is not None:
+            tocam = indice.query(base_no_imovel, predicate="intersects")
+            if len(tocam):
+                # No máximo a base inteira (arredondamento da medida): no máximo 100%.
+                coberta_ha = min(area_ha(_intersecao_com_uniao(base_no_imovel, cobertura[tocam])), base_ha)
+        linhas.append((cod, base_ha, coberta_ha))
+    return pd.DataFrame(linhas, columns=["cod_imovel", "base_ha", "covered_ha"])
 
 
 @dataclass(frozen=True)

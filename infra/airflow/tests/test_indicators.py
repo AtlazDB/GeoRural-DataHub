@@ -251,6 +251,130 @@ def test_invalid_feature_is_fixed_before_the_intersection():
     assert 0 < cob.covered_ha < cob.property_ha
 
 
+def test_invalid_feature_and_a_neighbor_cover_exactly_their_union():
+    from shapely.geometry import Polygon
+    # gravata = 2 triângulos (metade do quadrado oeste); vizinho = quadrado leste inteiro
+    gravata = Polygon([(0, 0), (0.05, 0.1), (0.05, 0), (0, 0.1), (0, 0)])
+    vizinho = box(0.05, 0, 0.1, 0.1)
+
+    cob = _cobertura(_imovel(("A", box(0, 0, 0.1, 0.1))), _poligonos(gravata, vizinho))["A"]
+
+    esperado = indicators.area_ha(box(0, 0, 0.05, 0.1)) / 2 + indicators.area_ha(vizinho)
+    assert abs(cob.covered_ha - esperado) <= Decimal("0.001")
+
+
+def test_layers_with_almost_the_same_border_do_not_lose_area():
+    # duas camadas com a borda comum quase igual (um vértice a 1e-12° fora da linha), como a APP e a
+    # vegetação do CAR: a união sem a grade fixa falhava ou perdia área sem erro (12/11)
+    from shapely.geometry import Polygon
+    oeste = box(0, 0, 0.05, 0.1)
+    leste = Polygon([(0.05, 0), (0.1, 0), (0.1, 0.1), (0.05, 0.1), (0.05 + 1e-12, 0.05), (0.05, 0)])
+
+    cob = _cobertura(_imovel(("A", box(0, 0, 0.1, 0.1))), _poligonos(oeste, leste))["A"]
+
+    # tolerância relativa: a união ganha vértices no meio das bordas e a área geodésica muda
+    # ~0,00002% (23 m² em 12 mil ha); a perda real do bug era de ~2% (0,93 de 50 ha)
+    assert abs(cob.covered_ha - cob.property_ha) <= cob.property_ha * Decimal("0.000001")
+
+
+def test_validas_keeps_only_the_area_part():
+    from shapely.geometry import Polygon
+    # polígono com uma "antena" de largura zero: o make_valid devolve polígono + linha
+    antena = Polygon([(0, 0), (0.1, 0), (0.1, 0.1), (0.1, 0.2), (0.1, 0.1), (0, 0.1), (0, 0)])
+
+    (valida,) = indicators._validas([antena])
+
+    assert valida.geom_type in ("Polygon", "MultiPolygon")
+    assert indicators.area_ha(valida) == indicators.area_ha(box(0, 0, 0.1, 0.1))
+
+
+def test_covered_area_never_passes_the_property(monkeypatch):
+    # a medida da interseção pode passar 1–2 m² do contorno (arredondamento): fica em 100%
+    monkeypatch.setattr(indicators, "_intersecao_com_uniao", lambda alvo, partes: box(-0.001, 0, 0.1, 0.1))
+
+    cob = _cobertura(_imovel(("A", box(0, 0, 0.1, 0.1))), _poligonos(box(0, 0, 0.1, 0.1)))["A"]
+
+    assert cob.covered_ha == cob.property_ha
+
+
+def test_covered_app_never_passes_the_app(monkeypatch):
+    real = indicators._intersecao_com_uniao
+    chamadas = []
+
+    def maior_na_segunda(alvo, partes):
+        chamadas.append(1)
+        return real(alvo, partes) if len(chamadas) == 1 else box(-0.001, 0, 0.05, 0.1)
+    monkeypatch.setattr(indicators, "_intersecao_com_uniao", maior_na_segunda)
+
+    med = _base(_imovel(("A", box(0, 0, 0.1, 0.1))), _poligonos(box(0, 0, 0.05, 0.1)),
+                _poligonos(box(0, 0, 0.05, 0.1)))["A"]
+
+    assert med.covered_ha == med.base_ha
+
+
 def test_area_ha_is_geodesic_and_in_hectares():
     # 0,01° x 0,01° no equador: ~1,11 km x 1,11 km = ~123 ha
     assert Decimal("122") < indicators.area_ha(box(0, 0, 0.01, 0.01)) < Decimal("124")
+
+
+# ---- cobertura dentro de uma camada base (BASE_COVERAGE, IAPP)
+
+def _base(imoveis, base, cobertura):
+    tabela = indicators.base_coverage_by_property(imoveis, base, cobertura)
+    return {c.cod_imovel: c for c in tabela.itertuples(index=False)}
+
+
+def test_half_of_the_app_with_vegetation_is_50_percent():
+    # APP = metade oeste do imóvel; vegetação = metade oeste da APP
+    med = _base(_imovel(("A", box(0, 0, 0.1, 0.1))), _poligonos(box(0, 0, 0.05, 0.1)),
+                _poligonos(box(0, 0, 0.025, 0.1)))["A"]
+
+    result = indicators.calculate_area_coverage(med.base_ha, med.covered_ha, RANGES)
+
+    assert abs(result.value - Decimal("50")) <= Decimal("0.0001")
+    assert med.base_ha == indicators.area_ha(box(0, 0, 0.05, 0.1))
+
+
+def test_vegetation_outside_the_app_does_not_count():
+    # vegetação só na metade leste, fora da APP
+    med = _base(_imovel(("A", box(0, 0, 0.1, 0.1))), _poligonos(box(0, 0, 0.05, 0.1)),
+                _poligonos(box(0.05, 0, 0.1, 0.1)))["A"]
+
+    assert med.covered_ha == Decimal("0.0000")
+
+
+def test_app_outside_the_property_does_not_count():
+    # a APP passa do imóvel: só a parte de dentro é o denominador
+    med = _base(_imovel(("A", box(0, 0, 0.1, 0.1))), _poligonos(box(-0.1, 0, 0.05, 0.1)),
+                _poligonos(box(-0.1, 0, 0.05, 0.1)))["A"]
+
+    assert med.base_ha == indicators.area_ha(box(0, 0, 0.05, 0.1))
+    assert med.covered_ha == med.base_ha
+
+
+def test_overlapping_app_and_vegetation_do_not_count_twice():
+    app = _poligonos(box(0, 0, 0.05, 0.1), box(0, 0, 0.05, 0.1))
+    veg = _poligonos(box(0, 0, 0.05, 0.1), box(0, 0, 0.05, 0.1))
+
+    med = _base(_imovel(("A", box(0, 0, 0.1, 0.1))), app, veg)["A"]
+
+    assert med.base_ha == indicators.area_ha(box(0, 0, 0.05, 0.1))
+    assert med.covered_ha == med.base_ha
+
+
+def test_property_without_app_does_not_appear():
+    # B não tem APP; C só encosta a borda na APP (sem área dentro)
+    tabela = indicators.base_coverage_by_property(
+        _imovel(("A", box(0, 0, 0.1, 0.1)), ("B", box(5, 5, 5.1, 5.1)), ("C", box(0.1, 0, 0.2, 0.1))),
+        _poligonos(box(0, 0, 0.1, 0.1)), _poligonos(box(0, 0, 0.1, 0.1)))
+
+    assert list(tabela["cod_imovel"]) == ["A"]
+
+
+def test_without_vegetation_the_app_is_zero_percent():
+    vazio = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+
+    med = _base(_imovel(("A", box(0, 0, 0.1, 0.1))), _poligonos(box(0, 0, 0.05, 0.1)), vazio)["A"]
+
+    assert med.base_ha > 0
+    assert med.covered_ha == Decimal("0.0000")
