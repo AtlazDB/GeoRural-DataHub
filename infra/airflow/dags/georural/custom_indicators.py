@@ -8,7 +8,17 @@ Dois modelos:
   dois lados são medidos do mesmo jeito (área geodésica do polígono), então o valor fica entre 0 e 100.
 
 Filtro opcional nos dois: parameters.category, que compara com input_feature.categoria (ex.: só os
-focos de um satélite). O valor vai como parâmetro do SQL, nunca concatenado.
+focos de um satélite). E parameters.since (AAAA-MM-DD), que só deixa entrar as feições com
+input_feature.data_referencia nesse dia ou depois (ex.: desmatamento após 22/07/2008, no IDesmat).
+Os valores vão como parâmetro do SQL, nunca concatenados.
+
+Terceiro modelo, BASE_COVERAGE (IAPP): quanto de uma camada base dentro do imóvel (parameters.baseSources,
+ex.: a APP) está coberto pelas fontes do indicador (ex.: vegetação nativa), em %. Imóvel sem a base
+não ganha resultado. category, since e extraSources valem para a cobertura, não para a base.
+
+Várias fontes num indicador (ISAP: UC + TI + quilombola + floresta pública): parameters.extraSources
+com os ids das outras fontes, além da principal (fonte_id). A cobertura usa a união dos polígonos de
+todas. A versão gravada no resultado é a mais nova entre as fontes.
 
 Imóvel sem nenhuma feição também ganha resultado (valor 0), para a tela mostrar o status dele.
 
@@ -21,6 +31,7 @@ no meio, rodar de novo completa: o MERGE não duplica.
 
 import json
 import logging
+from datetime import date
 from decimal import Decimal
 
 import geopandas as gpd
@@ -36,8 +47,10 @@ log = logging.getLogger(__name__)
 
 POINT_DENSITY = "POINT_DENSITY"
 AREA_COVERAGE = "AREA_COVERAGE"
+BASE_COVERAGE = "BASE_COVERAGE"
 # get_gtype() do SDO_GEOMETRY: 1 = ponto, 5 = multiponto, 3 = polígono, 7 = multipolígono
-_TIPOS = {POINT_DENSITY: ({1, 5}, "pontos"), AREA_COVERAGE: ({3, 7}, "polígonos")}
+_TIPOS = {POINT_DENSITY: ({1, 5}, "pontos"), AREA_COVERAGE: ({3, 7}, "polígonos"),
+          BASE_COVERAGE: ({3, 7}, "polígonos")}
 
 SQL_DEFINITION = """
     SELECT fonte_id, calculation_model, parameters, ranges, active
@@ -45,13 +58,17 @@ SQL_DEFINITION = """
      WHERE code = :code"""
 
 # A fonte de cada linha vem pela versão: dataset_versao -> execucao -> arquivo_bruto.
-# Sem categoria (NULL), o filtro não corta nada.
+# {fontes} vira ":fonte0, :fonte1, ..." (um parâmetro por fonte, nunca o id concatenado): a fonte
+# principal e as de parameters.extraSources (ex.: ISAP = UC + TI + quilombola + floresta pública).
+# Sem categoria ou sem data (NULL), o filtro não corta nada. Com data (parameters.since), só
+# entram as feições com data_referencia nesse dia ou depois (ex.: desmatamento após 22/07/2008).
 _DA_FONTE = """
       JOIN dataset_versao dv ON dv.id = f.dataset_versao_id
       JOIN execucao e        ON e.id  = dv.execucao_id
       JOIN arquivo_bruto a   ON a.id  = e.arquivo_bruto_id
-     WHERE a.fonte_id = :fonte
-       AND (:categoria IS NULL OR f.categoria = :categoria)"""
+     WHERE a.fonte_id IN ({fontes})
+       AND (:categoria IS NULL OR f.categoria = :categoria)
+       AND (:desde IS NULL OR f.data_referencia >= :desde)"""
 
 SQL_FEATURES = """
     SELECT f.dataset_versao_id, f.geometria.get_gtype(), SDO_UTIL.TO_WKBGEOMETRY(f.geometria)
@@ -125,25 +142,104 @@ def load_definition(cur, code: str) -> dict:
     return {
         "code": code,
         "fonte_id": int(fonte_id),
+        "sources": _sources(code, int(fonte_id), parameters.get("extraSources")),
         "model": model,
         "parameters": parameters,
         "category": parameters.get("category") or None,
+        "since": _since(code, parameters.get("since")),
+        "base_sources": _base_sources(code, model, parameters.get("baseSources")),
         "ranges": _from_json(ranges),
     }
 
 
-def load_features(cur, fonte_id: int, model: str, category: str | None = None) -> tuple[gpd.GeoDataFrame, int]:
-    """As feições da fonte (só as da categoria, se houver) e a versão usada (a mais nova entre as
-    linhas). O tipo tem que combinar com o modelo: pontos na densidade, polígonos na cobertura."""
-    cur.execute(SQL_FEATURES, fonte=fonte_id, categoria=category)
+def _base_sources(code: str, model: str, value) -> list[int]:
+    """parameters.baseSources do BASE_COVERAGE: a camada que vira o denominador (ex.: a APP no IAPP).
+    Obrigatório nesse modelo; nos outros, não é usado."""
+    if model != BASE_COVERAGE:
+        return []
+    if not isinstance(value, list) or not value:
+        raise IndicatorError(f"O indicador {code} precisa de baseSources (a camada base, ex.: a APP).")
+    fontes = []
+    for item in value:
+        try:
+            fonte = int(item)
+        except (TypeError, ValueError):
+            raise IndicatorError(f"O indicador {code} tem uma fonte inválida em baseSources: {item!r}.")
+        if fonte not in fontes:
+            fontes.append(fonte)
+    return fontes
+
+
+def _since(code: str, value) -> date | None:
+    """parameters.since no formato AAAA-MM-DD (ex.: "2008-07-22"); vazio = sem filtro de data."""
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        raise IndicatorError(f"O indicador {code} tem uma data inválida em since: {value!r} (use AAAA-MM-DD).")
+
+
+def _sources(code: str, main: int, extras) -> list[int]:
+    """A fonte principal e as de parameters.extraSources, sem repetir, na ordem do cadastro."""
+    if not extras:
+        return [main]
+    if not isinstance(extras, list):
+        raise IndicatorError(f"O indicador {code} tem extraSources inválido: {extras!r} (use uma lista de ids).")
+    fontes = [main]
+    for extra in extras:
+        try:
+            fonte = int(extra)
+        except (TypeError, ValueError):
+            raise IndicatorError(f"O indicador {code} tem uma fonte inválida em extraSources: {extra!r}.")
+        if fonte not in fontes:
+            fontes.append(fonte)
+    return fontes
+
+
+def _bind_sources(fontes) -> tuple[str, dict]:
+    """":fonte0, :fonte1, ..." para o {fontes} do SQL e os valores de cada um. Aceita um id só."""
+    ids = [fontes] if isinstance(fontes, int) else list(fontes)
+    return (", ".join(f":fonte{i}" for i in range(len(ids))),
+            {f"fonte{i}": int(fonte) for i, fonte in enumerate(ids)})
+
+
+def _sources_text(fontes) -> str:
+    """"A fonte 3" ou "As fontes 3, 12", para as mensagens de erro."""
+    ids = [fontes] if isinstance(fontes, int) else list(fontes)
+    if len(ids) == 1:
+        return f"A fonte {ids[0]}"
+    return "As fontes " + ", ".join(str(i) for i in ids)
+
+
+def _filter_text(category: str | None, since: date | None) -> str:
+    """O pedaço da mensagem de erro que diz quais filtros estavam ligados."""
+    partes = []
+    if category:
+        partes.append(f" com a categoria {category!r}")
+    if since:
+        partes.append(f" a partir de {since:%d/%m/%Y}")
+    return "".join(partes)
+
+
+def load_features(cur, fontes, model: str, category: str | None = None,
+                  since: date | None = None) -> tuple[gpd.GeoDataFrame, int]:
+    """As feições das fontes (um id ou a lista; só as da categoria e a partir da data, se houver) e
+    a versão usada (a mais nova entre as linhas). O tipo tem que combinar com o modelo: pontos na
+    densidade, polígonos na cobertura. Com várias fontes, a cobertura usa a união de todas (área
+    sobreposta não conta duas vezes); na densidade, cada ponto de cada fonte conta."""
+    marcadores, binds = _bind_sources(fontes)
+    cur.execute(SQL_FEATURES.format(fontes=marcadores), **binds, categoria=category, desde=since)
     linhas = cur.fetchall()
     if not linhas:
-        filtro = f" com a categoria {category!r}" if category else ""
-        raise IndicatorError(f"A fonte {fonte_id} não tem dados{filtro} no insumo genérico (input_feature).")
+        filtro = _filter_text(category, since)
+        verbo = "não tem" if _sources_text(fontes).startswith("A fonte") else "não têm"
+        raise IndicatorError(f"{_sources_text(fontes)} {verbo} dados{filtro} no insumo genérico (input_feature).")
     esperados, nome = _TIPOS[model]
     tipos = {int(gtype) for _, gtype, _ in linhas}
     if not tipos <= esperados:
-        raise IndicatorError(f"{model} precisa de {nome}, e a fonte {fonte_id} tem outros tipos ({sorted(tipos)}).")
+        raise IndicatorError(
+            f"{model} precisa de {nome}, e há outros tipos ({sorted(tipos)}) em: {_sources_text(fontes).lower()}.")
     versao = max(int(versao) for versao, _, _ in linhas)
     feicoes = gpd.GeoDataFrame(geometry=shapely.from_wkb([wkb for _, _, wkb in linhas]), crs="EPSG:4326")
     return feicoes, versao
@@ -155,9 +251,11 @@ def load_properties(cur) -> pd.DataFrame:
     return pd.DataFrame(cur.fetchall(), columns=["cod_imovel", "area_ha", "versao_imovel_id"])
 
 
-def load_candidates(cur, fonte_id: int, category: str | None = None) -> gpd.GeoDataFrame:
-    """A geometria só dos imóveis que podem tocar a fonte (o retângulo encosta numa feição)."""
-    cur.execute(SQL_CANDIDATES, fonte=fonte_id, categoria=category)
+def load_candidates(cur, fontes, category: str | None = None,
+                    since: date | None = None) -> gpd.GeoDataFrame:
+    """A geometria só dos imóveis que podem tocar as fontes (o retângulo encosta numa feição)."""
+    marcadores, binds = _bind_sources(fontes)
+    cur.execute(SQL_CANDIDATES.format(fontes=marcadores), **binds, categoria=category, desde=since)
     linhas = cur.fetchall()
     return gpd.GeoDataFrame(
         {"cod_imovel": [cod for cod, _ in linhas]},
@@ -218,6 +316,27 @@ def area_coverage_rows(code: str, properties: pd.DataFrame, coverage: pd.DataFra
     return rows
 
 
+def base_coverage_rows(code: str, properties: pd.DataFrame, coverage: pd.DataFrame, version: int,
+                       ranges: list[dict]) -> list[dict]:
+    """BASE_COVERAGE (IAPP): uma linha por imóvel que tem a camada base (APP) dentro dele.
+
+    coverage: cod_imovel, base_ha e covered_ha (indicators.base_coverage_by_property). O valor é
+    covered_ha ÷ base_ha × 100; o numerador é a área coberta e a área gravada (area_imovel_ha) é a
+    da base, o denominador: o passivo a recuperar é area_imovel_ha − numerator. Imóvel sem APP não
+    ganha linha: 0% diria "nada preservado", e não há nada a preservar.
+    """
+    medidos = {c.cod_imovel: c for c in coverage.itertuples(index=False)}
+    rows = []
+    for imovel in properties.itertuples(index=False):
+        medido = medidos.get(imovel.cod_imovel)
+        if medido is None:
+            continue
+        result = indicators.calculate_area_coverage(medido.base_ha, medido.covered_ha, ranges)
+        rows.append(_row(code, imovel, version, result.value, result.status, result.covered_ha,
+                         result.property_area_ha))
+    return rows
+
+
 def save_rows(con, rows: list[dict], lote: int) -> int:
     """MERGE em indicator_result, com commit a cada lote. Devolve quantas linhas gravou."""
     with con.cursor() as cur:
@@ -233,12 +352,22 @@ def calculate(cfg: Config, code: str) -> dict:
         with con.cursor() as cur:
             cur.outputtypehandler = _exact_types
             definition = load_definition(cur, code)
-            fonte, model, category = definition["fonte_id"], definition["model"], definition["category"]
-            feicoes, versao = load_features(cur, fonte, model, category)
+            fontes, model, category = definition["sources"], definition["model"], definition["category"]
+            since = definition["since"]
+            feicoes, versao = load_features(cur, fontes, model, category, since)
             properties = load_properties(cur)
-            candidates = load_candidates(cur, fonte, category)
+            if model == BASE_COVERAGE:
+                # Os imóveis candidatos são os que encostam na base (APP), sem os filtros da cobertura.
+                base, _ = load_features(cur, definition["base_sources"], AREA_COVERAGE)
+                candidates = load_candidates(cur, definition["base_sources"])
+            else:
+                candidates = load_candidates(cur, fontes, category, since)
 
-        if model == POINT_DENSITY:
+        if model == BASE_COVERAGE:
+            coverage = indicators.base_coverage_by_property(candidates, base, feicoes)
+            rows = base_coverage_rows(code, properties, coverage, versao, definition["ranges"])
+            tocados = len(coverage)
+        elif model == POINT_DENSITY:
             counts = indicators.count_fires(candidates, feicoes)
             factor = Decimal(str(definition["parameters"].get("factor", 1)))
             rows = point_density_rows(code, properties, counts, versao, factor, definition["ranges"])
@@ -249,7 +378,7 @@ def calculate(cfg: Config, code: str) -> dict:
             tocados = int((coverage["covered_ha"] > 0).sum())
         gravados = save_rows(con, rows, cfg.tamanho_lote)
 
-    log.info("%s (%s%s): %d imóveis gravados (%d tocados pela fonte), versão da fonte %d", code, model,
-             f", categoria {category!r}" if category else "", gravados, tocados, versao)
-    return {"code": code, "model": model, "category": category, "imoveis": gravados,
+    log.info("%s (%s%s, fontes %s): %d imóveis gravados (%d tocados pelas fontes), versão mais nova %d",
+             code, model, f", categoria {category!r}" if category else "", fontes, gravados, tocados, versao)
+    return {"code": code, "model": model, "category": category, "fontes": fontes, "imoveis": gravados,
             "tocados": tocados, "versao_fonte": versao}

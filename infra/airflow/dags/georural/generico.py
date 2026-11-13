@@ -182,7 +182,9 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
                     v = regras.validar(textos, geometrias, lista, ctx, repetidas=repetidas)
                     reprovadas = set(v.reprovadas().tolist())
                     sem_dados = regras.linhas_sem_dados(v, textos, lista)
-                    registros = textos.to_dict("records")
+                    # Só a geometria mapeada: textos tem 0 colunas e o to_dict("records") devolve [].
+                    registros = (textos.to_dict("records") if len(textos.columns)
+                                 else [{} for _ in range(len(textos))])
                     linhas = {d.tabela: [tratada.linha(d, registros[j], v.geometria[j])
                                          for j in range(len(ficam)) if j not in reprovadas]
                               for d in tratada.destinos}
