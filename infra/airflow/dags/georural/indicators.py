@@ -11,6 +11,11 @@ Os resultados precisam bater com os do PL/SQL, que são a referência
 """
 
 import calendar
+import gc
+import logging
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal, localcontext
@@ -20,6 +25,8 @@ import numpy as np
 import pandas as pd
 import shapely
 from pyproj import Geod
+
+log = logging.getLogger(__name__)
 
 FOUR_PLACES = Decimal("0.0001")
 # NUMBER do Oracle guarda até 38 dígitos; o Decimal padrão do Python, 28.
@@ -203,15 +210,81 @@ def coverage_by_property(properties: gpd.GeoDataFrame, features: gpd.GeoDataFram
     """
     pares = gpd.sjoin(properties[["cod_imovel", "geometry"]], features[["geometry"]],
                       predicate="intersects", how="inner")
-    linhas = []
-    for cod, grupo in pares.groupby("cod_imovel"):
-        imovel = _validas(grupo.geometry.iloc[0])[0]
-        feicoes = _validas(features.geometry.loc[grupo["index_right"]].values)
-        coberta = _intersecao_com_uniao(imovel, feicoes)
-        imovel_ha = area_ha(imovel)
-        # A interseção medida pode passar 1–2 m² do contorno (arredondamento): no máximo 100%.
-        linhas.append((cod, imovel_ha, min(area_ha(coberta), imovel_ha)))
+    imoveis, feicoes = _validas_dos_pares(pares, properties, features)
+    linhas = _em_paralelo(_cobertura_de, _tarefas_por_imovel(pares, imoveis, feicoes))
     return pd.DataFrame(linhas, columns=["cod_imovel", "property_ha", "covered_ha"])
+
+
+def _cobertura_de(cod, imovel, feicoes) -> tuple:
+    """A conta de um imóvel no coverage_by_property (geometrias já passadas pelo _validas)."""
+    coberta = _intersecao_com_uniao(imovel, feicoes)
+    imovel_ha = area_ha(imovel)
+    # A interseção medida pode passar 1–2 m² do contorno (arredondamento): no máximo 100%.
+    return cod, imovel_ha, min(area_ha(coberta), imovel_ha)
+
+
+def _validas_dos_pares(pares, properties, features) -> tuple[pd.Series, pd.Series]:
+    """O _validas de cada imóvel e de cada feição que aparece nos pares do sjoin, uma vez só e de
+    uma vez (vetorizado). Antes era por imóvel: uma feição que toca 5 imóveis era corrigida 5 vezes.
+    O resultado é o mesmo, porque o make_valid de cada geometria não depende das outras."""
+    usados_i = pares.index.unique()
+    usados_f = pares["index_right"].unique()
+    imoveis = pd.Series(list(_validas(properties.geometry.loc[usados_i].values)), index=usados_i, dtype=object)
+    feicoes = pd.Series(list(_validas(features.geometry.loc[usados_f].values)), index=usados_f, dtype=object)
+    return imoveis, feicoes
+
+
+def _tarefas_por_imovel(pares, imoveis: pd.Series, outras: pd.Series) -> list[tuple]:
+    """(cod_imovel, geometria do imóvel, geometrias da outra camada que o tocam) por imóvel, na
+    ordem do cod_imovel. Faz o mesmo que um groupby("cod_imovel") com .loc por grupo, que levava
+    ~2 min com 124 mil imóveis; aqui é só ordenar arrays. A ordenação estável mantém as feições
+    na ordem dos pares, como no groupby, então a união sai igual."""
+    cods = pares["cod_imovel"].to_numpy()
+    ordem = np.argsort(cods, kind="stable")
+    cods = cods[ordem]
+    geo_imovel = imoveis.reindex(pares.index).to_numpy()[ordem]
+    geo_outras = outras.reindex(pares["index_right"]).to_numpy()[ordem]
+    _, inicios = np.unique(cods, return_index=True)
+    fins = np.append(inicios[1:], len(cods))
+    return [(cods[i], geo_imovel[i], geo_outras[i:f]) for i, f in zip(inicios, fins)]
+
+
+# Processos para a conta por imóvel. O container do Airflow tem 4 GB: cada processo a mais
+# custa memória, por isso o padrão é no máximo 4. GEORURAL_PROCESSOS=1 volta a um processo só.
+_PROCESSOS = int(os.environ.get("GEORURAL_PROCESSOS", min(4, os.cpu_count() or 1)))
+# Abaixo disso não vale abrir processos (e os testes, que são pequenos, rodam num processo só).
+_MINIMO_PARALELO = 2000
+_FATIA = 1000
+_tarefas_do_pool: list = []
+
+
+def _fatia(funcao, inicio: int, fim: int) -> list:
+    """Roda no processo filho: as tarefas vêm do pai pelo fork, não são copiadas uma a uma."""
+    return [funcao(*tarefa) for tarefa in _tarefas_do_pool[inicio:fim]]
+
+
+def _em_paralelo(funcao, tarefas: list) -> list:
+    """funcao(*tarefa) para cada tarefa, na mesma ordem. Com muitas tarefas, divide entre
+    _PROCESSOS processos (fork); se não der para abrir processos, faz num processo só."""
+    global _tarefas_do_pool
+    if _PROCESSOS <= 1 or len(tarefas) < _MINIMO_PARALELO:
+        return [funcao(*tarefa) for tarefa in tarefas]
+    _tarefas_do_pool = tarefas
+    # gc.freeze: o coletor de lixo dos filhos não mexe nos objetos do pai, então as páginas de
+    # memória continuam compartilhadas (copy-on-write) em vez de serem copiadas para cada filho.
+    gc.freeze()
+    try:
+        inicios = range(0, len(tarefas), _FATIA)
+        with ProcessPoolExecutor(_PROCESSOS, mp_context=multiprocessing.get_context("fork")) as pool:
+            partes = pool.map(_fatia, [funcao] * len(inicios), inicios,
+                              [min(i + _FATIA, len(tarefas)) for i in inicios])
+            return [linha for parte in partes for linha in parte]
+    except (AssertionError, OSError) as erro:  # ex.: processo daemon não pode ter filhos
+        log.warning("Sem processos paralelos (%s): calculando num processo só", erro)
+        return [funcao(*tarefa) for tarefa in tarefas]
+    finally:
+        gc.unfreeze()
+        _tarefas_do_pool = []
 
 
 def base_coverage_by_property(properties: gpd.GeoDataFrame, base: gpd.GeoDataFrame,
@@ -227,24 +300,37 @@ def base_coverage_by_property(properties: gpd.GeoDataFrame, base: gpd.GeoDataFra
     """
     pares = gpd.sjoin(properties[["cod_imovel", "geometry"]], base[["geometry"]],
                       predicate="intersects", how="inner")
+    global _cobertura_base
+    imoveis, partes = _validas_dos_pares(pares, properties, base)
     cobertura = _validas(cover.geometry.values) if len(cover) else None
-    indice = shapely.STRtree(cobertura) if cobertura is not None else None
-    linhas = []
-    for cod, grupo in pares.groupby("cod_imovel"):
-        imovel = _validas(grupo.geometry.iloc[0])[0]
-        partes_base = _validas(base.geometry.loc[grupo["index_right"]].values)
-        base_no_imovel = _poligonal(_intersecao_com_uniao(imovel, partes_base))
-        base_ha = area_ha(base_no_imovel)
-        if base_ha <= 0:
-            continue
-        coberta_ha = Decimal("0.0000")
-        if indice is not None:
-            tocam = indice.query(base_no_imovel, predicate="intersects")
-            if len(tocam):
-                # No máximo a base inteira (arredondamento da medida): no máximo 100%.
-                coberta_ha = min(area_ha(_intersecao_com_uniao(base_no_imovel, cobertura[tocam])), base_ha)
-        linhas.append((cod, base_ha, coberta_ha))
+    _cobertura_base = (cobertura, shapely.STRtree(cobertura) if cobertura is not None else None)
+    tarefas = _tarefas_por_imovel(pares, imoveis, partes)
+    try:
+        linhas = [linha for linha in _em_paralelo(_cobertura_base_de, tarefas) if linha is not None]
+    finally:
+        _cobertura_base = (None, None)
     return pd.DataFrame(linhas, columns=["cod_imovel", "base_ha", "covered_ha"])
+
+
+# A camada de cobertura do base_coverage_by_property e o índice dela, para os processos filhos
+# (chegam pelo fork, como as tarefas).
+_cobertura_base: tuple = (None, None)
+
+
+def _cobertura_base_de(cod, imovel, partes_base) -> tuple | None:
+    """A conta de um imóvel no base_coverage_by_property; None quando a base não tem área nele."""
+    cobertura, indice = _cobertura_base
+    base_no_imovel = _poligonal(_intersecao_com_uniao(imovel, partes_base))
+    base_ha = area_ha(base_no_imovel)
+    if base_ha <= 0:
+        return None
+    coberta_ha = Decimal("0.0000")
+    if indice is not None:
+        tocam = indice.query(base_no_imovel, predicate="intersects")
+        if len(tocam):
+            # No máximo a base inteira (arredondamento da medida): no máximo 100%.
+            coberta_ha = min(area_ha(_intersecao_com_uniao(base_no_imovel, cobertura[tocam])), base_ha)
+    return cod, base_ha, coberta_ha
 
 
 @dataclass(frozen=True)

@@ -109,6 +109,49 @@ def test_alterar_nao_regrava_a_chave_e_marca_a_versao_nova():
     assert "2" not in [v for k, v in binds.items() if k.startswith("v")]
 
 
+# ---- geometria_wkb (V30): o WKB vai junto com a geometria, para o cálculo dos indicadores
+
+def _regras_com_geometria():
+    return [_regra("id", id_=1, campo="objectid", chave=True, tabela="input_feature"),
+            _regra("geom", id_=2, campo="geometria", tipo="GEOMETRIA", tabela="input_feature")]
+
+
+def test_tabela_com_geometria_wkb_grava_o_wkb_na_insercao_e_na_alteracao():
+    banco = BancoFalso(COLUNAS + ["geometria_wkb"], [("2", "rid2", "hash-velho")])
+    t = _tratada(banco, _regras_com_geometria())
+    quadrado = box(0, 0, 1, 1)
+
+    t.gravar(_linhas(t, [{"id": "1"}, {"id": "2"}], quadrado))
+
+    inserido = banco.instrucoes["INSERT"][0][0]
+    alterado = banco.instrucoes["UPDATE"][0][0]
+    assert inserido["geometria_wkb"] == tratada.wkb(quadrado)  # o mesmo WKB do hash
+    assert alterado["geometria_wkb"] == tratada.wkb(quadrado)
+
+
+def test_tabela_sem_geometria_wkb_nao_manda_a_coluna():
+    banco = BancoFalso(COLUNAS)  # ex.: car_reserva_legal, que não tem a coluna
+    t = _tratada(banco, _regras_com_geometria())
+
+    t.gravar(_linhas(t, [{"id": "1"}], box(0, 0, 1, 1)))
+
+    assert "geometria_wkb" not in banco.instrucoes["INSERT"][0][0]
+
+
+def test_car_grava_o_wkb_junto_no_merge_do_imovel():
+    gravados = []
+    cursor = SimpleNamespace(connection=BancoFalso([]), setinputsizes=lambda **_: None,
+                             executemany=lambda sql, linhas: gravados.extend(linhas))
+    quadrado = box(0, 0, 1, 1)
+    aprovado = SimpleNamespace(cod_imovel="PR-1", municipio="X", estado="PR", area_ha=1, situacao="AT",
+                               geometria=quadrado)
+
+    gravacao.gravar_imoveis(cursor, 9, [aprovado])
+
+    assert "geometria_wkb" in gravacao.SQL_MERGE_IMOVEL
+    assert gravados[0]["geometria_wkb"] == tratada.wkb(quadrado)
+
+
 def test_retrato_por_imovel_troca_so_o_que_mudou_e_nao_mexe_em_outro_imovel():
     regras = [_regra("cod", id_=1, campo="cod_imovel", tabela="car_reserva_legal"),
               _regra("v", id_=2, campo="valor", tabela="car_reserva_legal")]

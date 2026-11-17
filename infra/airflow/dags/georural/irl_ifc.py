@@ -65,8 +65,10 @@ SQL_PROPERTIES = """
        AND (:cod_imovel IS NULL OR cod_imovel = :cod_imovel)"""
 
 # Os focos guiam o índice espacial dos imóveis (como o hint ORDERED do pkg_indicadores).
+# A geometria vem da geometria_wkb (V30); imóvel antigo ainda sem ela é convertido na hora (o
+# COALESCE só converte quando falta). Os focos continuam convertidos: são pontos, é rápido.
 SQL_CANDIDATES = """
-    SELECT i.cod_imovel, SDO_UTIL.TO_WKBGEOMETRY(i.geometria)
+    SELECT i.cod_imovel, COALESCE(i.geometria_wkb, SDO_UTIL.TO_WKBGEOMETRY(i.geometria))
       FROM imovel_rural i
      WHERE i.area_ha > 0
        AND (:cod_imovel IS NULL OR i.cod_imovel = :cod_imovel)
@@ -174,6 +176,7 @@ def save_rows(con, rows: list[dict], lote: int) -> int:
 def build_irl(con, cod_imovel: str | None = None) -> list[dict]:
     """As linhas do IRL, sem gravar (como o calcular_irl; cod_imovel limita a um imóvel)."""
     with con.cursor() as cur:
+        cur.arraysize = cur.prefetchrows = 5000  # blocos grandes: ~557 mil imóveis por leitura
         cur.outputtypehandler = _exact_types
         rule = load_rule(cur, "IRL")
         cur.execute(SQL_IRL, cod_imovel=cod_imovel)
@@ -184,6 +187,7 @@ def build_ifc(con, cod_imovel: str | None = None, referencia: datetime | None = 
     """As linhas do IFC, sem gravar (como o calcular_ifc). referencia é o fim da janela, em UTC
     sem fuso (padrão: agora), como o data_hora do foco_calor. Sem versão de focos, nada."""
     with con.cursor() as cur:
+        cur.arraysize = cur.prefetchrows = 5000  # blocos grandes: ~557 mil imóveis por leitura
         cur.outputtypehandler = _exact_types
         rule = load_rule(cur, "IFC")
         meses = int(parameter(rule, "janela_meses"))
