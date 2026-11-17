@@ -82,6 +82,11 @@ def ler_colunas(shp: Path, nomes: list[str]):
     return tabela.rename(columns=existentes)
 
 
+def contar(shp: Path) -> int:
+    """Quantos registros o shapefile tem, sem ler os dados (para a barra de progresso)."""
+    return int(pyogrio.read_info(shp)["features"])
+
+
 def ler_em_lotes(shp: Path, tamanho_lote: int) -> Iterator[tuple[int, "object"]]:
     """Lê o shapefile em pedaços de `tamanho_lote` registros, já em SRID 4326.
 
