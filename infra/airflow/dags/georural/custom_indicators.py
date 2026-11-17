@@ -337,31 +337,106 @@ def base_coverage_rows(code: str, properties: pd.DataFrame, coverage: pd.DataFra
     return rows
 
 
-def save_rows(con, rows: list[dict], lote: int) -> int:
-    """MERGE em indicator_result, com commit a cada lote. Devolve quantas linhas gravou."""
+def save_rows(con, rows: list[dict], lote: int, on_batch=None) -> int:
+    """MERGE em indicator_result, com commit a cada lote. Devolve quantas linhas gravou.
+    on_batch(gravadas, total), se vier, é chamado depois de cada lote (a barra de progresso)."""
     with con.cursor() as cur:
         for inicio in range(0, len(rows), lote):
             cur.executemany(SQL_MERGE, rows[inicio:inicio + lote])
             con.commit()
+            if on_batch:
+                on_batch(min(inicio + lote, len(rows)), len(rows))
     return len(rows)
 
 
-def calculate(cfg: Config, code: str) -> dict:
-    """Calcula um indicador cadastrado para todos os imóveis e grava. Devolve um resumo para o XCom."""
+# --- Progresso do cálculo (US13.T18): a barra da tela de indicadores lê a indicator_calculation (V29).
+# O back cria a linha NA_FILA e passa o id no disparo ("calculation_id"); a DAG grava daqui em diante.
+
+# Faixas da barra por etapa, pelo tempo que cada uma levou no TT (AREA_COVERAGE, 557 mil imóveis):
+# a leitura dos candidatos e o cálculo são as mais demoradas.
+LEITURA, CALCULO, GRAVACAO = "LEITURA", "CALCULO", "GRAVACAO"
+_ATIVOS = "('NA_FILA', 'EM_ANDAMENTO')"
+
+
+def _update_calculation(cfg: Config, sql: str, **binds) -> None:
+    """Uma conexão própria, com commit na hora: o cálculo usa outra conexão e só faz commit por
+    lote, e a tela precisa ver o progresso enquanto ele roda. Se falhar, só registra no log: a
+    barra nunca derruba o cálculo."""
+    try:
+        with conectar(cfg) as con:
+            with con.cursor() as cur:
+                cur.execute(sql, **binds)
+            con.commit()
+    except Exception as erro:  # noqa: BLE001
+        log.warning("Não gravou o andamento do cálculo %s: %s", binds.get("id"), erro)
+
+
+def start_calculation(cfg: Config, calculation_id: int, dag_run_id: str | None) -> None:
+    """NA_FILA -> EM_ANDAMENTO, com a hora de início."""
+    _update_calculation(cfg, f"""
+        UPDATE indicator_calculation
+           SET status = 'EM_ANDAMENTO', started_at = SYSTIMESTAMP, progress = 0,
+               progress_step = '{LEITURA}', dag_run_id = NVL(:run, dag_run_id)
+         WHERE id = :id AND status IN {_ATIVOS}""", id=calculation_id, run=dag_run_id)
+
+
+def finish_calculation(cfg: Config, calculation_id: int, error: str | None = None) -> None:
+    """CONCLUIDO (barra em 100%) ou ERRO com a mensagem. Só mexe em cálculo ainda ativo: assim a
+    falha registrada pelo calcular() não é trocada pela mensagem genérica do callback da DAG."""
+    _update_calculation(cfg, f"""
+        UPDATE indicator_calculation
+           SET status = :status, finished_at = SYSTIMESTAMP, error_message = :erro,
+               progress = CASE WHEN :status = 'CONCLUIDO' THEN 100 ELSE progress END
+         WHERE id = :id AND status IN {_ATIVOS}""",
+        id=calculation_id, status="ERRO" if error else "CONCLUIDO", erro=(error or None) and error[:4000])
+
+
+class CalculationProgress:
+    """Grava o % e a etapa do cálculo. Só vai ao banco quando o % inteiro ou a etapa mudam (a
+    gravação chama a cada lote). Sem calculation_id (disparo manual pelo Airflow) não faz nada."""
+
+    def __init__(self, cfg: Config, calculation_id: int | None):
+        self._cfg = cfg
+        self._id = calculation_id
+        self._ultimo: tuple[int, str] | None = None
+
+    def set(self, percent: float, step: str) -> None:
+        atual = (max(0, min(100, int(percent))), step)
+        if self._id is None or atual == self._ultimo:
+            return
+        self._ultimo = atual
+        _update_calculation(self._cfg, f"""
+            UPDATE indicator_calculation SET progress = :pct, progress_step = :step
+             WHERE id = :id AND status IN {_ATIVOS}""", id=self._id, pct=atual[0], step=step)
+
+    def range(self, start: int, end: int, done: int, total: int, step: str) -> None:
+        """Progresso dentro de uma etapa que vai de start% a end%."""
+        fracao = min(done / total, 1) if total else 1
+        self.set(start + (end - start) * fracao, step)
+
+
+def calculate(cfg: Config, code: str, progress: CalculationProgress | None = None) -> dict:
+    """Calcula um indicador cadastrado para todos os imóveis e grava. Devolve um resumo para o XCom.
+    progress, se vier, recebe o andamento por etapa (a barra da tela)."""
+    progress = progress or CalculationProgress(cfg, None)
     with conectar(cfg) as con:
         with con.cursor() as cur:
             cur.outputtypehandler = _exact_types
+            progress.set(0, LEITURA)
             definition = load_definition(cur, code)
             fontes, model, category = definition["sources"], definition["model"], definition["category"]
             since = definition["since"]
             feicoes, versao = load_features(cur, fontes, model, category, since)
+            progress.set(10, LEITURA)
             properties = load_properties(cur)
+            progress.set(15, LEITURA)
             if model == BASE_COVERAGE:
                 # Os imóveis candidatos são os que encostam na base (APP), sem os filtros da cobertura.
                 base, _ = load_features(cur, definition["base_sources"], AREA_COVERAGE)
                 candidates = load_candidates(cur, definition["base_sources"])
             else:
                 candidates = load_candidates(cur, fontes, category, since)
+            progress.set(45, CALCULO)
 
         if model == BASE_COVERAGE:
             coverage = indicators.base_coverage_by_property(candidates, base, feicoes)
@@ -376,7 +451,9 @@ def calculate(cfg: Config, code: str) -> dict:
             coverage = indicators.coverage_by_property(candidates, feicoes)
             rows = area_coverage_rows(code, properties, coverage, versao, definition["ranges"])
             tocados = int((coverage["covered_ha"] > 0).sum())
-        gravados = save_rows(con, rows, cfg.tamanho_lote)
+        progress.set(85, GRAVACAO)
+        gravados = save_rows(con, rows, cfg.tamanho_lote,
+                             on_batch=lambda feitas, total: progress.range(85, 99, feitas, total, GRAVACAO))
 
     log.info("%s (%s%s, fontes %s): %d imóveis gravados (%d tocados pelas fontes), versão mais nova %d",
              code, model, f", categoria {category!r}" if category else "", fontes, gravados, tocados, versao)

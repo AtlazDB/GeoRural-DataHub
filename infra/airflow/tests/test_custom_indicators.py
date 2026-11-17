@@ -395,3 +395,59 @@ def test_save_rows_commits_one_batch_at_a_time():
     assert gravados == 5
     assert [len(lote) for lote in con.cursor_falso.lotes] == [2, 2, 1]
     assert con.commits == 3  # um commit por lote
+
+
+def test_save_rows_reports_each_batch_for_the_progress_bar():
+    avisos = []
+
+    custom_indicators.save_rows(ConexaoFalsa(), [{"cod_imovel": f"PR-{i}"} for i in range(5)], lote=2,
+                                on_batch=lambda feitas, total: avisos.append((feitas, total)))
+
+    assert avisos == [(2, 5), (4, 5), (5, 5)]
+
+
+# ---- progresso do cálculo (US13.T18)
+
+@pytest.fixture
+def gravacoes(monkeypatch):
+    """Guarda os UPDATE na indicator_calculation em vez de ir ao banco."""
+    feitas = []
+    monkeypatch.setattr(custom_indicators, "_update_calculation",
+                        lambda cfg, sql, **binds: feitas.append((sql, binds)))
+    return feitas
+
+
+def test_progress_only_writes_when_percent_or_step_change(gravacoes):
+    progresso = custom_indicators.CalculationProgress(cfg=None, calculation_id=7)
+
+    progresso.set(10, "LEITURA")
+    progresso.set(10.6, "LEITURA")   # mesmo % inteiro: não grava de novo
+    progresso.set(10, "CALCULO")     # etapa mudou: grava
+    progresso.set(150, "GRAVACAO")   # nunca passa de 100
+
+    assert [(b["pct"], b["step"]) for _, b in gravacoes] == [(10, "LEITURA"), (10, "CALCULO"), (100, "GRAVACAO")]
+    assert all(b["id"] == 7 for _, b in gravacoes)
+
+
+def test_progress_without_calculation_id_writes_nothing(gravacoes):
+    custom_indicators.CalculationProgress(cfg=None, calculation_id=None).set(50, "CALCULO")
+
+    assert gravacoes == []
+
+
+def test_progress_range_inside_a_step(gravacoes):
+    progresso = custom_indicators.CalculationProgress(cfg=None, calculation_id=1)
+
+    progresso.range(85, 99, 50, 100, "GRAVACAO")
+
+    assert gravacoes[0][1]["pct"] == 92
+
+
+def test_finish_marks_done_or_error_and_only_touches_an_active_calculation(gravacoes):
+    custom_indicators.finish_calculation(None, 3)
+    custom_indicators.finish_calculation(None, 4, "x" * 5000)
+
+    (sql_ok, ok), (_, erro) = gravacoes
+    assert ok["status"] == "CONCLUIDO" and ok["erro"] is None
+    assert erro["status"] == "ERRO" and len(erro["erro"]) == 4000
+    assert "status IN ('NA_FILA', 'EM_ANDAMENTO')" in sql_ok  # não troca um erro já gravado
