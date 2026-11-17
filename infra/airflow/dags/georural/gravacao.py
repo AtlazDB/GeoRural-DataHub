@@ -45,19 +45,21 @@ AUTOR_DESCARTE_AUTOMATICO = "DAG processar_arquivo (desempate de código repetid
 AUTOR_SEM_DADOS = "DAG processar_arquivo (registro sem geometria e sem área)"
 JUSTIFICATIVA_SEM_DADOS = "Descartado automaticamente: sem geometria e com área declarada 0, não há o que corrigir."
 
+# geometria_wkb (V30): a mesma geometria em WKB, para o cálculo dos indicadores ler sem pedir ao
+# Oracle o SDO_UTIL.TO_WKBGEOMETRY. Grava sempre junto com a geometria.
 SQL_MERGE_IMOVEL = """
     MERGE INTO imovel_rural d
     USING (SELECT :cod_imovel cod_imovel, :municipio municipio, :estado estado, :area_ha area_ha,
-                  :situacao situacao, :geometria geometria,
+                  :situacao situacao, :geometria geometria, :geometria_wkb geometria_wkb,
                   :dataset_versao_id dataset_versao_id FROM dual) s
     ON (d.cod_imovel = s.cod_imovel)
     WHEN MATCHED THEN UPDATE SET d.municipio = s.municipio, d.estado = s.estado,
          d.area_ha = s.area_ha, d.situacao = s.situacao, d.geometria = s.geometria,
-         d.dataset_versao_id = s.dataset_versao_id
+         d.geometria_wkb = s.geometria_wkb, d.dataset_versao_id = s.dataset_versao_id
     WHEN NOT MATCHED THEN INSERT (cod_imovel, municipio, estado, area_ha, situacao,
-         geometria, dataset_versao_id)
+         geometria, geometria_wkb, dataset_versao_id)
          VALUES (s.cod_imovel, s.municipio, s.estado, s.area_ha, s.situacao,
-                 s.geometria, s.dataset_versao_id)
+                 s.geometria, s.geometria_wkb, s.dataset_versao_id)
 """
 
 SQL_QUARENTENA = """
@@ -189,7 +191,9 @@ def gravar_imoveis(cur, dataset_versao_id: int, aprovados: list[Resultado]) -> N
     if not aprovados:
         return
     tipos = sdo.TiposSdo(cur.connection)
-    cur.setinputsizes(geometria=tipos.geometria)
+    # BLOB declarado: sem isso, no modo thin os bytes iriam como RAW (até 32 KB) e polígono grande
+    # chegaria cortado.
+    cur.setinputsizes(geometria=tipos.geometria, geometria_wkb=oracledb.DB_TYPE_BLOB)
     cur.executemany(
         SQL_MERGE_IMOVEL,
         [
@@ -200,6 +204,7 @@ def gravar_imoveis(cur, dataset_versao_id: int, aprovados: list[Resultado]) -> N
                 "area_ha": r.area_ha,
                 "situacao": r.situacao,
                 "geometria": tipos.converter(r.geometria, sdo.SRID_BANCO),
+                "geometria_wkb": wkb(r.geometria),
                 "dataset_versao_id": dataset_versao_id,
             }
             for r in aprovados

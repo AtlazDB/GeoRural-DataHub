@@ -31,6 +31,7 @@ no meio, rodar de novo completa: o MERGE não duplica.
 
 import json
 import logging
+import time
 from datetime import date
 from decimal import Decimal
 
@@ -70,8 +71,15 @@ _DA_FONTE = """
        AND (:categoria IS NULL OR f.categoria = :categoria)
        AND (:desde IS NULL OR f.data_referencia >= :desde)"""
 
-SQL_FEATURES = """
-    SELECT f.dataset_versao_id, f.geometria.get_gtype(), SDO_UTIL.TO_WKBGEOMETRY(f.geometria)
+# A geometria vem da geometria_wkb (V30), gravada pela carga: pedir ao Oracle o
+# SDO_UTIL.TO_WKBGEOMETRY a cada cálculo levava minutos. Linha antiga ainda sem WKB (antes da
+# DAG preencher_geometria_wkb) é convertida na hora, como antes: o COALESCE só converte quando
+# falta. O SDO_FILTER continua na geometria.
+WKB_FEATURE = "COALESCE(f.geometria_wkb, SDO_UTIL.TO_WKBGEOMETRY(f.geometria))"
+WKB_PROPERTY = "COALESCE(i.geometria_wkb, SDO_UTIL.TO_WKBGEOMETRY(i.geometria))"
+
+SQL_FEATURES = f"""
+    SELECT f.dataset_versao_id, f.geometria.get_gtype(), {WKB_FEATURE}
       FROM input_feature f""" + _DA_FONTE
 
 SQL_PROPERTIES = """
@@ -80,8 +88,8 @@ SQL_PROPERTIES = """
      WHERE area_ha > 0"""
 
 # As feições guiam o índice espacial dos imóveis (como o hint ORDERED do pkg_indicadores).
-SQL_CANDIDATES = """
-    SELECT i.cod_imovel, SDO_UTIL.TO_WKBGEOMETRY(i.geometria)
+SQL_CANDIDATES = f"""
+    SELECT i.cod_imovel, {WKB_PROPERTY}
       FROM imovel_rural i
      WHERE i.area_ha > 0
        AND i.ROWID IN (
@@ -419,25 +427,36 @@ def calculate(cfg: Config, code: str, progress: CalculationProgress | None = Non
     """Calcula um indicador cadastrado para todos os imóveis e grava. Devolve um resumo para o XCom.
     progress, se vier, recebe o andamento por etapa (a barra da tela)."""
     progress = progress or CalculationProgress(cfg, None)
+    t0 = time.perf_counter()
     with conectar(cfg) as con:
         with con.cursor() as cur:
+            # Busca em blocos grandes: o padrão (100 linhas por ida ao banco) vira milhares de viagens
+            # com 166 mil feições e 557 mil imóveis.
+            cur.arraysize = 5000
+            cur.prefetchrows = 5000
             cur.outputtypehandler = _exact_types
             progress.set(0, LEITURA)
             definition = load_definition(cur, code)
             fontes, model, category = definition["sources"], definition["model"], definition["category"]
             since = definition["since"]
             feicoes, versao = load_features(cur, fontes, model, category, since)
+            log.info("Leitura das feições: %.1f s (%d feições)", time.perf_counter() - t0, len(feicoes))
             progress.set(10, LEITURA)
+            t = time.perf_counter()
             properties = load_properties(cur)
+            log.info("Leitura dos imóveis: %.1f s (%d imóveis)", time.perf_counter() - t, len(properties))
             progress.set(15, LEITURA)
+            t = time.perf_counter()
             if model == BASE_COVERAGE:
                 # Os imóveis candidatos são os que encostam na base (APP), sem os filtros da cobertura.
                 base, _ = load_features(cur, definition["base_sources"], AREA_COVERAGE)
                 candidates = load_candidates(cur, definition["base_sources"])
             else:
                 candidates = load_candidates(cur, fontes, category, since)
+            log.info("Leitura dos candidatos: %.1f s (%d candidatos)", time.perf_counter() - t, len(candidates))
             progress.set(45, CALCULO)
 
+        t1 = time.perf_counter()
         if model == BASE_COVERAGE:
             coverage = indicators.base_coverage_by_property(candidates, base, feicoes)
             rows = base_coverage_rows(code, properties, coverage, versao, definition["ranges"])
@@ -451,9 +470,12 @@ def calculate(cfg: Config, code: str, progress: CalculationProgress | None = Non
             coverage = indicators.coverage_by_property(candidates, feicoes)
             rows = area_coverage_rows(code, properties, coverage, versao, definition["ranges"])
             tocados = int((coverage["covered_ha"] > 0).sum())
+        log.info("Cálculo: %.1f s (%d linhas)", time.perf_counter() - t1, len(rows))
         progress.set(85, GRAVACAO)
+        t2 = time.perf_counter()
         gravados = save_rows(con, rows, cfg.tamanho_lote,
                              on_batch=lambda feitas, total: progress.range(85, 99, feitas, total, GRAVACAO))
+        log.info("Gravação: %.1f s", time.perf_counter() - t2)
 
     log.info("%s (%s%s, fontes %s): %d imóveis gravados (%d tocados pelas fontes), versão mais nova %d",
              code, model, f", categoria {category!r}" if category else "", fontes, gravados, tocados, versao)

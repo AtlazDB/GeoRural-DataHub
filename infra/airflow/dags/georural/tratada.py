@@ -179,7 +179,9 @@ class Tratada:
         convertidos.update(campos_derivados(destino.tabela, convertidos))
         valores = {campo: convertidos.get(campo) for campo in destino.campos}
         geometria = geometria if destino.geometria is not None else None
-        return {"valores": valores, "geometria": geometria, "hash": hash_registro(valores, wkb(geometria))}
+        geometria_wkb = wkb(geometria)
+        return {"valores": valores, "geometria": geometria, "wkb": geometria_wkb,
+                "hash": hash_registro(valores, geometria_wkb)}
 
     def gravar(self, linhas_por_destino: dict[str, list[dict]]) -> Contagem:
         """Grava um bloco e dá commit."""
@@ -228,31 +230,51 @@ class Tratada:
             campos.append("dataset_versao_id")
         return campos
 
+    @staticmethod
+    def _com_wkb(destino: Destino) -> bool:
+        """A tabela guarda a geometria também em WKB (geometria_wkb, V30: imovel_rural e
+        input_feature), para o cálculo dos indicadores. Grava sempre junto com a geometria."""
+        return destino.geometria is not None and "geometria_wkb" in destino.colunas
+
     def _binds(self, destino: Destino, linha: dict, campos: list[str]) -> dict:
         binds = {f"v{i}": (self.versao_id if c == "dataset_versao_id" and c not in linha["valores"]
                            else linha["valores"][c]) for i, c in enumerate(campos)}
         binds["geometria"] = self.tipos.converter(linha["geometria"])
+        if self._com_wkb(destino):
+            binds["geometria_wkb"] = linha["wkb"] if "wkb" in linha else wkb(linha["geometria"])
         binds["hash_registro"] = linha["hash"]
         return binds
 
+    def _tipos_geometria(self, cur, destino: Destino) -> None:
+        """SDO_GEOMETRY e, se houver, o WKB declarado como BLOB: sem isso, no modo thin os bytes
+        iriam como RAW (até 32 KB) e polígono grande chegaria cortado."""
+        if not destino.geometria:
+            return
+        if self._com_wkb(destino):
+            cur.setinputsizes(geometria=self.tipos.geometria, geometria_wkb=oracledb.DB_TYPE_BLOB)
+        else:
+            cur.setinputsizes(geometria=self.tipos.geometria)
+
     def _inserir(self, cur, destino: Destino, linhas: list[dict]) -> None:
         campos = self._campos(destino, linhas[0])
-        colunas = campos + (["geometria"] if destino.geometria else []) + ["hash_registro"]
+        com_wkb = self._com_wkb(destino)
+        colunas = campos + (["geometria"] if destino.geometria else []) \
+            + (["geometria_wkb"] if com_wkb else []) + ["hash_registro"]
         valores = [f":v{i}" for i in range(len(campos))] \
-            + ([":geometria"] if destino.geometria else []) + [":hash_registro"]
+            + ([":geometria"] if destino.geometria else []) \
+            + ([":geometria_wkb"] if com_wkb else []) + [":hash_registro"]
         sql = f"INSERT INTO {destino.tabela} ({', '.join(colunas)}) VALUES ({', '.join(valores)})"
-        if destino.geometria:
-            cur.setinputsizes(geometria=self.tipos.geometria)
+        self._tipos_geometria(cur, destino)
         cur.executemany(sql, [self._sem_geometria(destino, self._binds(destino, l, campos)) for l in linhas])
 
     def _alterar(self, cur, destino: Destino, linhas: list[tuple[str, dict]]) -> None:
         campos = [c for c in self._campos(destino, linhas[0][1]) if c not in {r.campo for r in destino.chaves}]
         atribuicoes = [f"{c} = :v{i}" for i, c in enumerate(campos)] \
             + (["geometria = :geometria"] if destino.geometria else []) \
+            + (["geometria_wkb = :geometria_wkb"] if self._com_wkb(destino) else []) \
             + ["hash_registro = :hash_registro"]
         sql = f"UPDATE {destino.tabela} SET {', '.join(atribuicoes)} WHERE ROWID = CHARTOROWID(:rid)"
-        if destino.geometria:
-            cur.setinputsizes(geometria=self.tipos.geometria)
+        self._tipos_geometria(cur, destino)
         cur.executemany(sql, [{**self._sem_geometria(destino, self._binds(destino, l, campos)), "rid": rowid}
                               for rowid, l in linhas])
 
@@ -260,6 +282,7 @@ class Tratada:
     def _sem_geometria(destino: Destino, binds: dict) -> dict:
         if destino.geometria is None:
             binds.pop("geometria")
+            binds.pop("geometria_wkb", None)
         return binds
 
     def gravar_um(self, cur, destino: Destino, linha: dict) -> bool:
