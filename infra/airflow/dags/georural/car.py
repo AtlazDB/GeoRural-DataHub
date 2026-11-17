@@ -64,6 +64,9 @@ def preparar(cfg: Config, arquivo_id: int, ja_reservado: bool, dag_run_id: str |
 def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
     """Baixa, lê, valida e grava. Se algo falhar, desfaz tudo e propaga o erro
     (quem chama registra a falha — ver registrar_falha)."""
+    # Barra da tela: download e extração até 10%, lotes de 10% a 95%, concluir() põe 100%.
+    progresso = gravacao.Progress(cfg, execucao_id)
+    progresso.set(0, "DOWNLOAD")
     with conectar(cfg) as con:
         arquivo = gravacao.buscar_arquivo(con, arquivo_id)
 
@@ -71,8 +74,11 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
             pasta = Path(tmp)
             zip_local = bucket.baixar(cfg, arquivo.chave_objeto, pasta / "arquivo.zip")
             log.info("Baixado %s (%.1f MB)", arquivo.chave_objeto, zip_local.stat().st_size / 1e6)
+            progresso.set(5, "EXTRACAO")
             shapefiles = shapefile.extrair(zip_local, pasta / "extraido")
             zip_local.unlink()  # libera o disco: daqui para frente só os .shp importam
+            total_registros = sum(shapefile.contar(shp) for shp in shapefiles)
+            progresso.set(10, "GRAVACAO")
 
             validador = ValidadorImovel(_planejar_desempate(shapefiles))
             try:
@@ -86,7 +92,9 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
                         for primeira_linha, lote in shapefile.ler_em_lotes(shp, cfg.tamanho_lote):
                             _gravar_lote(cur, validador, lote, primeira_linha, versao, execucao_id, resumo, fila)
                             log.info("%s: %d lidos até agora", shp.name, resumo.lidos)
+                            progresso.faixa(10, 95, resumo.lidos, total_registros, "GRAVACAO")
 
+                    progresso.set(95, "CONCLUSAO")
                     resumo.quarentena_iguais = fila.iguais
                     resumo.substituidos = gravacao.concluir(cur, arquivo_id, execucao_id, versao,
                                                             resumo.lidos, resumo.validos, resumo.invalidos)

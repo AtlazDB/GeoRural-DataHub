@@ -7,14 +7,19 @@ para o "Revalidar" gravar o registro depois.
 """
 
 import json
+import logging
 from dataclasses import dataclass, field
 
 import oracledb
 import shapely
 
 from georural import sdo
+from georural.banco import conectar
+from georural.config import Config
 from georural.tratada import FaltaMigration, hash_registro, wkb
 from georural.validacao import Resultado
+
+log = logging.getLogger(__name__)
 
 CONJUNTO_IMOVEIS = "imoveis_rurais"
 # O que os dois caminhos sabem ler (ver leitura.py): zip de shapefile ou de GeoJSON, ou GeoJSON.
@@ -445,7 +450,8 @@ def concluir(cur, arquivo_id: int, execucao_id: int, versao: Versao,
     cur.execute(
         """
         UPDATE execucao SET status = 'CONCLUIDA', finalizada_em = SYSTIMESTAMP,
-               registros_lidos = :lidos, registros_validos = :validos, registros_invalidos = :invalidos
+               registros_lidos = :lidos, registros_validos = :validos, registros_invalidos = :invalidos,
+               progress = 100, progress_step = 'CONCLUIDA'
          WHERE id = :id
         """,
         lidos=lidos, validos=validos, invalidos=invalidos, id=execucao_id,
@@ -481,18 +487,73 @@ def aguardando_mapeamento(con, arquivo_id: int, execucao_id: int, mensagem: str)
 
 
 def falhar(con, arquivo_id: int, execucao_id: int | None, mensagem: str) -> None:
-    """Registra a falha numa transação própria (a principal já foi desfeita)."""
+    """Registra a falha numa transação própria (a principal já foi desfeita).
+
+    Só mexe numa execução ainda EM_ANDAMENTO. Se o usuário cancelou pela tela, o back já
+    fechou a execução (FALHOU, "Cancelado pelo usuário.") e liberou o arquivo; a falha que
+    chega depois, da tarefa derrubada, não pode marcar REJEITADO um reprocessamento que já
+    começou nem trocar a mensagem do cancelamento.
+    """
     with con.cursor() as cur:
         if execucao_id is not None:
             cur.execute(
                 """
                 UPDATE execucao SET status = 'FALHOU', finalizada_em = SYSTIMESTAMP, mensagem_erro = :msg
-                 WHERE id = :id
+                 WHERE id = :id AND status = 'EM_ANDAMENTO'
                 """,
                 msg=(mensagem or "")[:4000], id=execucao_id,
             )
+            if cur.rowcount == 0:
+                con.commit()
+                log.info("Execução %s já não está em andamento (cancelada?): arquivo %s não muda",
+                         execucao_id, arquivo_id)
+                return
         cur.execute(
             "UPDATE arquivo_bruto SET status = 'REJEITADO', processado_em = SYSTIMESTAMP WHERE id = :id",
             id=arquivo_id,
         )
     con.commit()
+
+
+def update_progress(cfg: Config, execucao_id: int, percent: int, step: str) -> None:
+    """Grava o progresso (0 a 100) e a etapa atual para a barra da tela.
+
+    Usa uma conexão própria, com commit na hora: o processamento do CAR roda numa
+    transação só, e sem isso a tela só veria o progresso no fim.
+    Só atualiza execução EM_ANDAMENTO (uma execução cancelada não volta a andar).
+    Se falhar, só registra no log: a barra nunca derruba o processamento.
+    """
+    try:
+        with conectar(cfg) as con:
+            with con.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE execucao SET progress = :pct, progress_step = :step
+                     WHERE id = :id AND status = 'EM_ANDAMENTO'
+                    """,
+                    pct=max(0, min(100, int(percent))), step=step[:30], id=execucao_id,
+                )
+            con.commit()
+    except Exception as erro:  # noqa: BLE001
+        log.warning("Não gravou o progresso da execução %s: %s", execucao_id, erro)
+
+
+class Progress:
+    """Lembra o último progresso gravado e só vai ao banco quando o % inteiro ou a etapa mudam:
+    com lotes pequenos, gravar a cada lote abriria uma conexão por lote à toa."""
+
+    def __init__(self, cfg: Config, execucao_id: int):
+        self._cfg = cfg
+        self._execucao_id = execucao_id
+        self._ultimo: tuple[int, str] | None = None
+
+    def set(self, percent: float, step: str) -> None:
+        atual = (int(percent), step)
+        if atual != self._ultimo:
+            self._ultimo = atual
+            update_progress(self._cfg, self._execucao_id, atual[0], step)
+
+    def faixa(self, inicio: int, fim: int, feitos: int, total: int, step: str) -> None:
+        """Progresso dentro de uma etapa que vai de `inicio`% a `fim`%."""
+        fracao = feitos / total if total else 1
+        self.set(inicio + (fim - inicio) * min(fracao, 1), step)

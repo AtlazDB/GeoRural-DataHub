@@ -105,12 +105,17 @@ class Resumo:
 
 def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
     resumo = Resumo(arquivo_id=arquivo_id, execucao_id=execucao_id)
+    # Barra da tela: download até 5%, 1ª passada até 20% (o total só se sabe no fim dela),
+    # blocos de 20% a 95%, concluir() põe 100%.
+    progresso = gravacao.Progress(cfg, execucao_id)
+    progresso.set(0, "DOWNLOAD")
     with conectar(cfg) as con, tempfile.TemporaryDirectory(prefix="generico-") as tmp:
         pasta = Path(tmp)
         arquivo = gravacao.buscar_arquivo(con, arquivo_id)
         fonte_id = _fonte(con, arquivo_id)
         local = bucket.baixar(cfg, arquivo.chave_objeto, pasta / arquivo.nome_original)
         log.info("Baixado %s (%.1f MB)", arquivo.chave_objeto, local.stat().st_size / 1e6)
+        progresso.set(5, "LEITURA")
 
         # O mapeamento vem antes da 1ª passada: ele diz as colunas do desempate e da chave.
         mapa = colunas.mapeamento(con, fonte_id)
@@ -172,6 +177,7 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
             with con.cursor() as cur:
                 fila = gravacao.carregar_fila(cur, resumo.conjunto, bool(regras.regras_de_chave(lista)))
 
+            progresso.set(20, "GRAVACAO")
             posicao = 0  # posição, no arquivo inteiro, da 1ª linha do bloco
             for bloco in leitura.tabelas(local, pasta / "p2", cfg.tamanho_lote):
                 with _etapa(resumo, "validacao"):
@@ -205,7 +211,9 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
                 resumo.correcoes += len(v.correcoes)
                 posicao += len(bloco)
                 log.info("Bloco gravado: %d de %d registros", posicao, resumo.lidos)
+                progresso.faixa(20, 95, posicao, resumo.lidos, "GRAVACAO")
 
+            progresso.set(95, "CONCLUSAO")
             with _etapa(resumo, "conclusao"):
                 total.somar(tratada.finalizar())
                 with con.cursor() as cur:
