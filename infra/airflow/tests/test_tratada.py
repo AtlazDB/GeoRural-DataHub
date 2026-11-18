@@ -284,6 +284,54 @@ def test_levantamento_do_bloco_igual_ao_registro_a_registro(tmp_path):
     assert (bloco.nomes, bloco.amostra, bloco.tem_geometria) == (um.nomes, um.amostra, um.tem_geometria)
 
 
+def _zip_shapefile(tmp_path, quantidade: int):
+    import geopandas as gpd
+    gdf = gpd.GeoDataFrame(
+        {"cod": [f"PR-{i}" for i in range(quantidade)], "area": [1.5 * i for i in range(quantidade)]},
+        geometry=[box(i, 0, i + 1, 1) for i in range(quantidade)], crs="EPSG:4674")
+    origem = tmp_path / "origem"
+    origem.mkdir()
+    gdf.to_file(origem / "AREA.shp")
+    destino = tmp_path / "fonte.zip"
+    with zipfile.ZipFile(destino, "w") as z:
+        for arquivo in origem.iterdir():
+            z.write(arquivo, arcname=arquivo.name)
+    return destino
+
+
+def test_shapefile_sem_geometria_tem_os_mesmos_atributos_e_linhas(tmp_path):
+    zip_ = _zip_shapefile(tmp_path, 7)
+
+    com = list(leitura.tabelas(zip_, tmp_path / "com", 3))
+    sem = list(leitura.tabelas(zip_, tmp_path / "sem", 3, geometria=False))
+
+    assert [(b.linhas, b.camadas, b.atributos) for b in sem] == [(b.linhas, b.camadas, b.atributos) for b in com]
+    assert all(g is not None for b in com for g in b.geometrias)
+    assert all(g is None for b in sem for g in b.geometrias)
+    assert all(b.geometria_declarada is True for b in sem)
+    assert all(b.geometria_declarada is None for b in com)
+
+
+def test_levantamento_sem_geometria_igual_ao_com_geometria(tmp_path):
+    zip_ = _zip_shapefile(tmp_path, 4)
+    com, sem = colunas.Levantamento(), colunas.Levantamento()
+    for t in leitura.tabelas(zip_, tmp_path / "com", 3):
+        com.acrescentar_tabela(t)
+    for t in leitura.tabelas(zip_, tmp_path / "sem", 3, geometria=False):
+        sem.acrescentar_tabela(t)
+
+    assert (sem.nomes, sem.amostra, sem.tem_geometria) == (com.nomes, com.amostra, True)
+
+
+def test_geojson_sem_geometria_continua_lendo_a_geometria(tmp_path):
+    arquivo = tmp_path / "f.geojson"
+    arquivo.write_bytes(_pagina(0, 2))
+
+    bloco = next(leitura.tabelas(arquivo, tmp_path / "x", 10, geometria=False))
+
+    assert all(g is not None for g in bloco.geometrias) and bloco.geometria_declarada is None
+
+
 def test_normalizar_tira_vertice_repetido_e_orienta():
     horario = box(-51, -25, -50, -24).exterior.coords[::-1]
     from shapely.geometry import Polygon

@@ -72,7 +72,11 @@ class Levantamento:
             if len(amostra) < AMOSTRA:
                 amostra.extend(v for v in valores if v is not None)
                 del amostra[AMOSTRA:]
-        if any(g is not None for g in bloco.geometrias):
+        # Bloco lido sem geometria: quem diz é o arquivo; senão, as geometrias do bloco.
+        declarada = getattr(bloco, "geometria_declarada", None)
+        if declarada is None:
+            declarada = any(g is not None for g in bloco.geometrias)
+        if declarada:
             self.tem_geometria = True
 
 
