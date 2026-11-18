@@ -22,8 +22,8 @@ from georural.validacao import Resultado
 log = logging.getLogger(__name__)
 
 CONJUNTO_IMOVEIS = "imoveis_rurais"
-# O que os dois caminhos sabem ler (ver leitura.py): zip de shapefile ou de GeoJSON, ou GeoJSON.
-EXTENSOES_PROCESSAVEIS = (".zip", ".geojson", ".json")
+# O que a carga sabe ler (ver leitura.py): zip de shapefile ou de GeoJSON, GeoJSON ou CSV (este, só no genérico).
+EXTENSOES_PROCESSAVEIS = (".zip", ".geojson", ".json", ".csv")
 # Conjunto de dados (dataset_versao.conjunto) pela tabela de destino: o IFC, o IRL e a
 # Rastreabilidade procuram as versões por estes nomes.
 CONJUNTO_DA_TABELA = {
