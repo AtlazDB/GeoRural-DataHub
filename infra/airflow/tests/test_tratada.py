@@ -183,6 +183,37 @@ def test_retrato_do_conjunto_apaga_o_que_nao_veio_e_conta_repetidas():
     assert banco.instrucoes["DELETE"][0] == [{"rid": "r3"}]
 
 
+def test_retrato_casa_cada_copia_do_arquivo_com_uma_da_tabela():
+    regras = [_regra("v", id_=1, campo="valor", tabela="input_feature")]
+    t = _tratada(BancoFalso(COLUNAS), regras)
+    hx = t.linha(t.destinos[0], {"v": "x"}, None)["hash"]
+    hy = t.linha(t.destinos[0], {"v": "y"}, None)["hash"]
+    banco = BancoFalso(COLUNAS, [("r1", hx), ("r2", hy), ("r3", hx)])
+    t = _tratada(banco, regras)
+
+    contagem = t.gravar(_linhas(t, [{"v": "x"}, {"v": "y"}, {"v": "x"}]))
+    removidos = t.finalizar().removidos
+
+    assert (contagem.iguais, contagem.inseridos, removidos) == (3, 0, 0)
+    assert banco.instrucoes["INSERT"] == [] and banco.instrucoes["DELETE"] == []
+
+
+def test_retrato_por_imovel_com_copias_e_sobra_em_blocos_diferentes():
+    regras = [_regra("cod", id_=1, campo="cod_imovel", tabela="car_reserva_legal"),
+              _regra("v", id_=2, campo="valor", tabela="car_reserva_legal")]
+    t = _tratada(BancoFalso(COLUNAS), regras)
+    h = t.linha(t.destinos[0], {"cod": "A", "v": "1"}, None)["hash"]
+    banco = BancoFalso(COLUNAS, [("A", "r1", h), ("A", "r2", h), ("A", "r3", h)])
+    t = _tratada(banco, regras)
+
+    um = t.gravar(_linhas(t, [{"cod": "A", "v": "1"}]))
+    dois = t.gravar(_linhas(t, [{"cod": "A", "v": "1"}]))
+    removidos = t.finalizar().removidos
+
+    assert (um.iguais + dois.iguais, um.inseridos + dois.inseridos, removidos) == (2, 0, 1)
+    assert banco.instrucoes["DELETE"][0] == [{"rid": "r3"}]  # as duas primeiras ficaram, a 3ª cópia sobrou
+
+
 def test_estado_vem_em_todas_as_linhas_mesmo_sem_poder_deduzir():
     regras = [_regra("cod", id_=1, campo="cod_imovel", tabela="imovel_rural", chave=True)]
     banco = BancoFalso(["cod_imovel", "estado", "dataset_versao_id", "hash_registro"])
