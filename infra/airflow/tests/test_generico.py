@@ -193,3 +193,16 @@ def test_falha_nos_indicadores_nao_derruba_a_carga(monkeypatch):
 
     assert generico._recalcular_indicadores(con, "reserva_legal", 500) == "falhou: Nenhuma regra ativa para o indicador IRL"
     assert con.rollbacks == 1
+
+
+def test_etapa_soma_os_blocos_rapidos_sem_zerar(monkeypatch):
+    from georural import generico
+    relogio = iter(x * 0.01 for x in range(200))  # cada etapa leva 10 ms
+    monkeypatch.setattr(generico.time, "monotonic", lambda: next(relogio))
+    resumo = generico.Resumo(arquivo_id=1, execucao_id=1)
+
+    for _ in range(50):
+        with generico._etapa(resumo, "gravacao"):
+            pass
+
+    assert round(resumo.tempos["gravacao"], 1) == 0.5  # arredondando a cada bloco daria 0.0

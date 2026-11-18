@@ -83,6 +83,9 @@ class Destino:
     regras: list[Regra]                 # na ordem do pkg_tratada.montar: chave primeiro, depois por id
     colunas: set[str]                   # colunas que a tabela tem
     modo: str = ""                      # chave | imovel | conjunto
+    # O que a tabela já tem. Modo chave: {chave: (rowid, hash)}. Modos imovel e conjunto:
+    # {grupo: {hash: [rowids]}} (grupo = cod_imovel, ou None no conjunto), indexado pelo hash para
+    # cada linha achar a sua igual direto (numa lista, a carga-retrato era quadrática).
     existentes: dict = field(default_factory=dict)
     vistos: dict = field(default_factory=lambda: defaultdict(list))
 
@@ -160,15 +163,18 @@ class Tratada:
             destino.existentes = {tuple(canonico(v) for v in linha[:n]): (linha[n], linha[n + 1]) for linha in cur}
         elif destino.modo == "imovel":
             cur.execute(f"SELECT cod_imovel, ROWIDTOCHAR(ROWID), hash_registro FROM {tabela}")
-            por_imovel = defaultdict(list)
+            por_imovel = defaultdict(dict)
             for cod_imovel, rowid, hash_ in cur:
-                por_imovel[cod_imovel].append((rowid, hash_))
+                por_imovel[cod_imovel].setdefault(hash_, []).append(rowid)
             destino.existentes = por_imovel
         else:
             filtro = self._filtro_conjunto(destino)
             cur.execute(f"SELECT ROWIDTOCHAR(ROWID), hash_registro FROM {tabela}{filtro}",
                         **({"conjunto": self.conjunto} if filtro else {}))
-            destino.existentes = {None: [(rowid, hash_) for rowid, hash_ in cur]}
+            por_hash: dict[str, list[str]] = {}
+            for rowid, hash_ in cur:
+                por_hash.setdefault(hash_, []).append(rowid)
+            destino.existentes = {None: por_hash}
         cur.outputtypehandler = None
 
     # -------------------------------------------------------------- gravação
@@ -208,12 +214,16 @@ class Tratada:
                     alterar.append((anterior[0], linha))
             else:
                 grupo = linha["valores"].get("cod_imovel") if destino.modo == "imovel" else None
-                anteriores = destino.existentes.get(grupo, [])
-                igual = next((i for i, (_, h) in enumerate(anteriores) if h == linha["hash"]), None)
-                if igual is None:
+                anteriores = destino.existentes.get(grupo, {})
+                iguais = anteriores.get(linha["hash"])
+                if not iguais:
                     inserir.append(linha)
                 else:
-                    destino.vistos[grupo].append(anteriores.pop(igual))
+                    # Cada linha do arquivo usa uma das iguais da tabela: duas cópias no arquivo
+                    # casam com duas na tabela, e a sobra é apagada no finalizar.
+                    destino.vistos[grupo].append((iguais.pop(0), linha["hash"]))
+                    if not iguais:
+                        del anteriores[linha["hash"]]
                     contagem.iguais += 1
                 destino.vistos.setdefault(grupo, [])
         if inserir:
@@ -310,7 +320,8 @@ class Tratada:
                 if destino.modo == "chave":
                     continue
                 grupos = destino.vistos.keys() if destino.modo == "imovel" else [None]
-                sobras = [rowid for g in grupos for rowid, _ in destino.existentes.get(g, [])]
+                sobras = [rowid for g in grupos for rowids in destino.existentes.get(g, {}).values()
+                          for rowid in rowids]
                 if sobras:
                     cur.executemany(f"DELETE FROM {destino.tabela} WHERE ROWID = CHARTOROWID(:rid)",
                                     [{"rid": r} for r in sobras])

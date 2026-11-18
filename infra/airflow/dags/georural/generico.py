@@ -235,6 +235,8 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
         if resumo.inseridos or resumo.alterados or resumo.removidos:
             with _etapa(resumo, "indicadores"):
                 resumo.indicadores = _recalcular_indicadores(con, resumo.conjunto, cfg.tamanho_lote)
+    # Arredonda só no fim: arredondar a cada bloco zerava a etapa que leva milissegundos por bloco.
+    resumo.tempos = {nome: round(segundos, 1) for nome, segundos in resumo.tempos.items()}
     log.info("Arquivo %s processado: %s", arquivo_id, resumo)
     log.info("Tempos do arquivo %s (s): %s", arquivo_id, _tempos(resumo))
     return resumo
@@ -242,12 +244,13 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
 
 @contextmanager
 def _etapa(resumo: Resumo, nome: str):
-    """Mede uma etapa e guarda em resumo.tempos (vai para o XCom da DAG junto com o resumo)."""
+    """Mede uma etapa e soma em resumo.tempos (vai para o XCom da DAG junto com o resumo).
+    A soma fica sem arredondar; o processar arredonda no fim."""
     inicio = time.monotonic()
     try:
         yield
     finally:
-        resumo.tempos[nome] = round(resumo.tempos.get(nome, 0) + time.monotonic() - inicio, 1)
+        resumo.tempos[nome] = resumo.tempos.get(nome, 0) + time.monotonic() - inicio
 
 
 def _tempos(resumo: Resumo) -> str:
