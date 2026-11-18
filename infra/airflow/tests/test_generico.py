@@ -56,10 +56,12 @@ def test_geojson_em_outro_crs_e_reprojetado(tmp_path):
 
 
 def test_formato_nao_suportado(tmp_path):
-    arquivo = tmp_path / "dados.csv"
-    arquivo.write_text("a,b\n1,2\n")
-    with pytest.raises(leitura.ArquivoInvalido):
+    arquivo = tmp_path / "dados.xlsx"  # o .csv passou a ser lido (US13.T22); o Excel continua fora
+    arquivo.write_bytes(b"PK\x03\x04")
+    with pytest.raises(leitura.ArquivoInvalido, match="Formato não suportado"):
         list(leitura.registros(arquivo, tmp_path / "x"))
+    with pytest.raises(leitura.ArquivoInvalido, match="Formato não suportado"):
+        list(leitura.tabelas(arquivo, tmp_path / "y", 10))
 
 
 def test_texto_no_formato_das_regras():
