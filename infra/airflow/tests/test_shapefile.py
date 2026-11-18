@@ -39,6 +39,16 @@ def test_extrai_e_le_em_lotes_em_4326(tmp_path):
     assert all(lote.crs.to_epsg() == 4326 for _, lote in lotes)
 
 
+def test_le_em_lotes_sem_geometria(tmp_path):
+    shp = shapefile.extrair(_zip_com_shapefile(tmp_path, 7), tmp_path / "extraido")[0]
+
+    lotes = list(shapefile.ler_em_lotes(shp, tamanho_lote=3, geometria=False))
+
+    assert [primeira for primeira, _ in lotes] == [1, 4, 7]
+    assert all(list(lote.columns) == ["cod_imovel", "num_area"] for _, lote in lotes)
+    assert shapefile.tem_geometria(shp)
+
+
 def test_rejeita_zip_sem_dbf(tmp_path):
     origem = _zip_com_shapefile(tmp_path, 1)
     sem_dbf = tmp_path / "sem_dbf.zip"

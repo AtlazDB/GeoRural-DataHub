@@ -247,6 +247,9 @@ class Tabela:
     camadas: list[str]           # de onde veio cada linha: o .shp ou a página do zip
     atributos: dict[str, list]   # coluna -> valores como tipos do Python (None no lugar de nulo)
     geometrias: list             # shapely ou None
+    # Lido com geometria=False: as geometrias vêm todas None, e isto diz se o arquivo tem
+    # geometria. None quando a geometria foi lida (aí quem diz são as próprias geometrias).
+    geometria_declarada: bool | None = None
 
     def __len__(self) -> int:
         return len(self.linhas)
@@ -262,22 +265,29 @@ class Tabela:
         return {nome: valores[posicao] for nome, valores in self.atributos.items()}
 
 
-def tabelas(caminho: Path, pasta: Path, tamanho: int) -> Iterator[Tabela]:
+def tabelas(caminho: Path, pasta: Path, tamanho: int, geometria: bool = True) -> Iterator[Tabela]:
     """O arquivo em blocos de até `tamanho` linhas, na mesma ordem e com os mesmos valores que
-    registros() entrega: o shapefile pelo pyogrio (GeoPandas), o GeoJSON pelo json."""
+    registros() entrega: o shapefile pelo pyogrio (GeoPandas), o GeoJSON pelo json.
+
+    geometria=False (1ª passada do genérico): o shapefile é lido só com os atributos, o que
+    poupa decodificar e reprojetar todas as formas; as geometrias do bloco vêm None e o
+    `geometria_declarada` diz se o arquivo tem geometria. O GeoJSON é lido igual nos dois casos.
+    """
     linha = 0
-    for camada, atributos, geometrias in _blocos(caminho, pasta):
+    for camada, atributos, geometrias, declarada in _blocos(caminho, pasta, geometria):
         for inicio in range(0, len(geometrias), tamanho):
             fim = min(inicio + tamanho, len(geometrias))
             yield Tabela(list(range(linha + inicio + 1, linha + fim + 1)), [camada] * (fim - inicio),
-                         {k: v[inicio:fim] for k, v in atributos.items()}, geometrias[inicio:fim])
+                         {k: v[inicio:fim] for k, v in atributos.items()}, geometrias[inicio:fim],
+                         declarada)
         linha += len(geometrias)
 
 
-def _blocos(caminho: Path, pasta: Path):
+def _blocos(caminho: Path, pasta: Path, geometria: bool = True):
+    """(camada, atributos, geometrias, geometria_declarada) de cada pedaço do arquivo."""
     sufixo = caminho.suffix.lower()
     if sufixo in EXTENSOES_GEOJSON:
-        yield _geojson_em_colunas(caminho, caminho.name)
+        yield *_geojson_em_colunas(caminho, caminho.name), None
         return
     if sufixo != ".zip":
         raise ArquivoInvalido(f"Formato não suportado no processamento: {caminho.name} "
@@ -290,10 +300,13 @@ def _blocos(caminho: Path, pasta: Path):
 
     if tem_shp:
         for shp in shapefile.extrair(caminho, pasta):
-            for _, gdf in shapefile.ler_em_lotes(shp, 5000):
-                coluna_geo = gdf.geometry.name
-                atributos = {c: [_valor_python(v) for v in gdf[c].tolist()] for c in gdf.columns if c != coluna_geo}
-                yield shp.name, atributos, list(gdf.geometry.array)
+            declarada = None if geometria else shapefile.tem_geometria(shp)
+            for _, tabela in shapefile.ler_em_lotes(shp, 5000, geometria=geometria):
+                coluna_geo = tabela.geometry.name if geometria else None
+                atributos = {c: [_valor_python(v) for v in tabela[c].tolist()]
+                             for c in tabela.columns if c != coluna_geo}
+                formas = list(tabela.geometry.array) if geometria else [None] * len(tabela)
+                yield shp.name, atributos, formas, declarada
         return
 
     paginas = sorted(p for p in _extrair(caminho, pasta)
@@ -301,7 +314,7 @@ def _blocos(caminho: Path, pasta: Path):
     if not paginas:
         raise ArquivoInvalido("O zip não tem shapefile (.shp) nem GeoJSON.")
     for pagina in paginas:
-        yield _geojson_em_colunas(pagina, pagina.name)
+        yield *_geojson_em_colunas(pagina, pagina.name), None
         pagina.unlink()  # libera o disco: a página já foi lida
 
 

@@ -87,11 +87,14 @@ def contar(shp: Path) -> int:
     return int(pyogrio.read_info(shp)["features"])
 
 
-def ler_em_lotes(shp: Path, tamanho_lote: int) -> Iterator[tuple[int, "object"]]:
+def ler_em_lotes(shp: Path, tamanho_lote: int, geometria: bool = True) -> Iterator[tuple[int, "object"]]:
     """Lê o shapefile em pedaços de `tamanho_lote` registros, já em SRID 4326.
 
     Devolve (número da primeira linha do lote, GeoDataFrame). A memória usada depende do
     tamanho do lote, não do tamanho do arquivo.
+
+    Com geometria=False vêm só os atributos, num DataFrame do pandas: o GDAL nem decodifica as
+    formas do .shp e não há o que reprojetar (a 1ª passada do genérico só precisa disso).
     """
     info = pyogrio.read_info(shp)
     total = int(info["features"])
@@ -99,10 +102,16 @@ def ler_em_lotes(shp: Path, tamanho_lote: int) -> Iterator[tuple[int, "object"]]
 
     for inicio in range(0, total, tamanho_lote):
         lote = pyogrio.read_dataframe(
-            shp, skip_features=inicio, max_features=tamanho_lote, encoding=codificacao
+            shp, skip_features=inicio, max_features=tamanho_lote, encoding=codificacao,
+            read_geometry=geometria,
         )
         # O CAR chega em SIRGAS 2000 (4674); o banco guarda tudo em 4326. Entre os dois a diferença
         # é de centímetros, mas reprojetar deixa o pipeline certo para qualquer outra fonte.
-        if lote.crs is not None and lote.crs.to_epsg() != SRID_DESTINO:
+        if geometria and lote.crs is not None and lote.crs.to_epsg() != SRID_DESTINO:
             lote = lote.to_crs(SRID_DESTINO)
         yield inicio + 1, lote
+
+
+def tem_geometria(shp: Path) -> bool:
+    """Se o shapefile declara um tipo de geometria, sem ler as feições."""
+    return pyogrio.read_info(shp)["geometry_type"] is not None

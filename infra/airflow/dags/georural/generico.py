@@ -125,11 +125,12 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
         valores_desempate: dict[str, list] = {c: [] for c in cols.todas()} if cols else {}
 
         # 1ª passada: as colunas que vieram, os valores do desempate e a chave natural de cada linha
-        # (sem geometria: cabe na memória).
+        # (sem geometria: cabe na memória). O shapefile nem lê as formas aqui (geometria=False):
+        # quem precisa delas é a 2ª passada.
         levantamento = colunas.Levantamento()
         chaves: list = []
         with _etapa(resumo, "leitura"):
-            for bloco in leitura.tabelas(local, pasta / "p1", cfg.tamanho_lote):
+            for bloco in leitura.tabelas(local, pasta / "p1", cfg.tamanho_lote, geometria=False):
                 levantamento.acrescentar_tabela(bloco)
                 for nome, valores in valores_desempate.items():
                     valores.extend(bloco.atributos.get(nome, [None] * len(bloco)))
