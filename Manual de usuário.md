@@ -18,13 +18,17 @@ Gabriel Nunes · Rodolfo Corbalan
    - [Back-end](#back-end)
    - [Front-end](#front-end)
    - [Primeira carga de dados](#primeira-carga-de-dados)
+   - [Usuários de teste](#usuários-de-teste)
 5. [Como usar](#como-usar)
+   - [Entrar e sair](#entrar-e-sair)
+   - [Perfis de acesso](#perfis-de-acesso)
    - [Visão geral da tela](#visão-geral-da-tela)
    - [Fontes de dados](#fontes-de-dados)
    - [Mapeamento de colunas](#mapeamento-de-colunas)
    - [Quarentena](#quarentena)
    - [Imóveis rurais](#imóveis-rurais)
    - [Rastreabilidade](#rastreabilidade)
+   - [Usuários e perfis](#usuários-e-perfis)
 6. [Mensagens comuns e o que fazer](#mensagens-comuns-e-o-que-fazer)
 7. [Limitações conhecidas](#limitações-conhecidas)
 
@@ -76,7 +80,9 @@ espaciais. A plataforma:
   ela;
 - exibe os **imóveis rurais do Paraná** em mapa e tabela, com os **indicadores** de Reserva Legal
   (IRL) e de focos de calor (IFC) de cada imóvel;
-- mostra a **rastreabilidade** de cada indicador: de qual arquivo, versão e regra veio o número.
+- mostra a **rastreabilidade** de cada indicador: de qual arquivo, versão e regra veio o número;
+- controla o **acesso por perfil** (Operador de dados, Analista, Auditor e Gestor), com login pelo
+  Keycloak e a gestão dos perfis feita pelo próprio Gestor, numa tela do sistema.
 
 
 ## Requisitos de sistema
@@ -211,6 +217,43 @@ espaciais. A plataforma:
 - O sistema mostra o histórico de cálculos de um indicador e o que mudou em relação ao cálculo
   anterior (o dado, a regra ou os dois).
 
+#### RF08 — Login e controle de acesso por perfil
+
+> Como pessoa usuária do sistema, quero entrar com meu usuário e senha e ver apenas o que o meu
+> perfil permite, para que os dados e as operações fiquem protegidos.
+
+- O sistema exige login para usar qualquer tela e qualquer rota da API. Sem um login válido, a API
+  responde com erro 401 ("Autenticação necessária: envie um token válido.").
+- O login é feito numa tela do **Keycloak**, com a identidade visual do GeoRural e em português. A
+  senha não passa pelo front-end do sistema.
+- Cada pessoa tem um ou mais **perfis**: Operador de dados, Analista, Auditor e Gestor.
+- O menu mostra só as telas liberadas ao perfil. Quem digita o endereço de uma tela que o seu perfil
+  não vê é levado a uma tela permitida. Quem não tem nenhum perfil vê "Sem acesso a nenhuma área".
+- Os botões que alteram dados (cadastrar, importar, mapear, processar, corrigir, descartar,
+  calcular) só aparecem para Operador de dados e Gestor.
+- A API também barra no servidor: um perfil sem permissão recebe erro 403 ("Você não tem permissão
+  para acessar este recurso."), mesmo que a chamada seja feita fora da tela.
+- A sessão é renovada automaticamente enquanto a pessoa usa o sistema (cada acesso vale 15
+  minutos). Quando a sessão termina, o sistema volta ao login.
+- O topo da tela mostra o nome e o perfil de quem está conectado e o botão **Sair**.
+
+#### RF09 — Gestão de usuários e perfis
+
+> Como Gestor, quero ver os usuários do sistema e definir o que cada um pode usar, para controlar
+> quem acessa cada área sem depender da equipe técnica.
+
+- O sistema lista os usuários, com nome, usuário, e-mail e perfis, e permite buscar por nome,
+  usuário ou e-mail. A lista é paginada (20 por página).
+- O Gestor define os perfis de um usuário marcando ou desmarcando os quatro perfis do GeoRural. Só
+  esses quatro perfis podem ser atribuídos por esta tela.
+- O Gestor não pode remover o próprio perfil de Gestor, para não perder o acesso ao sistema.
+- Um usuário sem nenhum perfil consegue entrar, mas não acessa nenhuma tela.
+- A mudança de perfil vale no próximo login da pessoa (ou em até 15 minutos, se ela estiver
+  conectada).
+- Só o Gestor acessa esta tela e esta parte da API; os demais perfis recebem erro 403.
+- Se o servidor de login (Keycloak) estiver fora do ar, a tela avisa que o serviço de autenticação
+  está indisponível.
+
 ### Não funcionais
 
 **Tecnologia e arquitetura**
@@ -220,6 +263,9 @@ espaciais. A plataforma:
   rodam em pacotes PL/SQL no próprio banco.
 - Estrutura do banco versionada com Flyway (criada automaticamente na primeira subida).
 - API REST em JSON; geometrias em GeoJSON.
+- Autenticação e autorização com **Keycloak 26** (OpenID Connect), em Docker. O realm `georural`
+  (perfis, usuários de teste, clients e tela de login) é importado do arquivo
+  `keycloak/georural-realm.json`, no repositório do back-end.
 - Arquivos originais guardados na zona bruta do Object Storage da Oracle Cloud (OCI).
 - O processamento e a coleta são feitos pelo orquestrador **Apache Airflow** (configurado em
   `infra/airflow` neste repositório). O back-end só registra os pedidos e o Airflow faz o trabalho:
@@ -247,16 +293,29 @@ espaciais. A plataforma:
 - A coleta por link só aceita `http`/`https`, recusa endereços internos da rede, limita
   redirecionamentos, tempo de resposta e tamanho do download.
 - Cabeçalhos de requisição das fontes por link não são devolvidos pela API.
+- Toda rota da API exige um token válido do Keycloak. O back-end valida o token (Spring Security
+  como *resource server*) e libera cada rota só para os perfis da matriz de permissões.
+- O login do front-end usa *Authorization Code com PKCE* (keycloak-js); o token fica só em memória
+  e a senha nunca passa pelo sistema.
+- Os perfis são *realm roles* do Keycloak (`OPERADOR_DADOS`, `ANALISTA`, `AUDITOR`, `GESTOR`) e
+  vão dentro do token. O que o front-end esconde (menu, telas e botões) é só conforto: quem barra
+  de verdade é o back-end.
+- Para gerenciar usuários, o back-end usa uma conta técnica (`georural-backend`) com as permissões
+  mínimas do Keycloak para consultar e alterar usuários. A gestão só aceita os quatro perfis do
+  GeoRural e é restrita ao Gestor.
 
 **Usabilidade e confiabilidade**
 - As mensagens de erro da API vêm em português, com o código HTTP apropriado.
 - O andamento do processamento é atualizado automaticamente na tela, sem recarregar a página.
 - A interface tem modo claro e modo escuro.
+- A tela de login tem a identidade visual do GeoRural e está em português do Brasil.
 
 **Manutenibilidade**
 - Código versionado no GitHub, com o fluxo de branches `feature → dev → main` e revisão por Pull
   Request.
 - O back-end segue arquitetura em camadas (`controller` → `service` → `repository`).
+- A matriz de permissões por perfil vive em dois lugares que precisam andar juntos: `SecurityConfig`
+  (back-end) e `router/index.js` com `usePermissoes.js` (front-end).
 - A memória de cálculo dos indicadores, com exemplos reais e o passo a passo de conferência no
   QGIS, está em `docs/memoria-de-calculo/` no repositório do back-end.
 
@@ -274,14 +333,29 @@ o Object Storage.
 1. Clone o repositório `Atlaz4-BackEnd`.
 2. Copie o `.env.example` para `.env`, na raiz do projeto, e preencha `OCI_NAMESPACE`,
    `OCI_BUCKET`, `DB_USERNAME` e `DB_PASSWORD`. Para processar e coletar, suba também o Airflow
-   (`infra/airflow/README.md` deste repositório).
+   (`infra/airflow/README.md` deste repositório). O login usa valores padrão de desenvolvimento;
+   para trocá-los, veja a observação depois do passo 6.
 3. Configure a credencial da OCI em `~/.oci/config`, no perfil `DEFAULT`. **Sem esse arquivo a
    aplicação não inicia**, mesmo que você não vá enviar arquivos.
-4. Suba o banco: `docker compose up -d`. A primeira subida demora alguns minutos; o banco está
-   pronto quando `docker logs oracle` mostrar `DATABASE IS READY TO USE!`.
+4. Suba o banco e o servidor de login (Keycloak): `docker compose up -d`. A primeira subida demora
+   alguns minutos; o banco está pronto quando `docker logs oracle` mostrar
+   `DATABASE IS READY TO USE!`. O Keycloak fica em `http://localhost:8081` e importa sozinho o
+   realm `georural` (perfis, usuários de teste e tela de login) quando o container é criado. O
+   painel de administração dele é `http://localhost:8081/admin/master/console/`, com usuário e
+   senha padrão de desenvolvimento `admin` / `admin`.
 5. Rode a aplicação: `mvnw.cmd spring-boot:run` (Windows) ou `./mvnw spring-boot:run`. As tabelas
    são criadas automaticamente na primeira subida.
 6. A API fica disponível em `http://localhost:8080/api/v1`.
+
+> **Login (Keycloak).** Valores que podem ser definidos no `.env`: `KEYCLOAK_URL` (padrão
+> `http://localhost:8081`), `KEYCLOAK_BACKEND_SECRET` (segredo da conta técnica do back-end),
+> `KEYCLOAK_ADMIN` e `KEYCLOAK_ADMIN_PASSWORD` (administrador do painel). Os padrões servem só para
+> desenvolvimento.
+>
+> **Recriar o Keycloak** (para aplicar uma mudança em `keycloak/georural-realm.json` ou no tema de
+> login): `docker rm -f keycloak` e depois `docker compose up -d --no-deps keycloak`. O realm só é
+> importado quando o container é criado. **Nunca use `docker compose down -v`**: ele apaga também o
+> volume do banco Oracle.
 
 ### Front-end
 
@@ -290,14 +364,19 @@ o Object Storage.
 1. Clone o repositório `Atlaz4-FrontEnd`.
 2. Instale as dependências: `npm install`.
 3. Copie o `.env.example` para `.env.development`.
-4. Edite o `.env.development` e defina `VITE_API_URL=http://localhost:8080/api/v1`, com o back-end
-   já rodando.
-5. Rode `npm run dev`. O navegador abre sozinho em `http://localhost:5173`.
+4. Edite o `.env.development` e defina, com o back-end e o Keycloak já rodando:
+   - `VITE_API_URL=http://localhost:8080/api/v1`
+   - `VITE_KEYCLOAK_URL=http://localhost:8081`
+   - `VITE_KEYCLOAK_REALM=georural`
+   - `VITE_KEYCLOAK_CLIENT_ID=georural-frontend`
+5. Rode `npm run dev`. O navegador abre sozinho em `http://localhost:5173` e vai para a tela de
+   login (veja [Entrar e sair](#entrar-e-sair)).
 
 > **Só para testar o envio de arquivos, sem o back-end:** mantenha o `VITE_API_URL` do
 > `.env.example` e rode `npm run start`, que sobe um servidor de exemplo junto com a tela. Esse
 > servidor só atende a lista de fontes e o envio de arquivos; Quarentena, Imóveis rurais,
-> Rastreabilidade, processamento e mapeamento só funcionam com o back-end real.
+> Rastreabilidade, processamento e mapeamento só funcionam com o back-end real. Como esse servidor não valida o login, defina também
+> `VITE_AUTH_HABILITADO=false` no `.env.development`.
 
 ### Primeira carga de dados
 
@@ -316,11 +395,77 @@ Com o banco vazio e o Airflow ligado, carregue os dados nesta ordem — cada eta
    imóveis de uma vez.
 
 
+### Usuários de teste
+
+O realm importado traz quatro usuários para o ambiente de desenvolvimento, todos com a senha
+`georural123`:
+
+| Usuário | Perfil |
+|---|---|
+| `operador` | Operador de dados |
+| `analista` | Analista |
+| `auditor` | Auditor |
+| `gestor` | Gestor |
+
+> **Só para desenvolvimento.** Em um ambiente real, troque ou remova esses usuários e defina uma
+> senha própria para o administrador do Keycloak.
+
+
 ## Como usar
+
+### Entrar e sair
+
+<!-- TODO: print da tela de login -->
+
+Ao abrir o sistema (`http://localhost:5173`), se você ainda não estiver conectado, o navegador vai
+para a tela de **login** do GeoRural DataHub. Ela é do Keycloak, o servidor de identidade do
+sistema: a sua senha não passa pelo GeoRural.
+
+1. Digite o **Usuário ou e-mail** e a **Senha**.
+2. Clique em **Entrar**. Com os dados corretos, o sistema abre na primeira tela liberada ao seu
+   perfil.
+3. Se os dados estiverem errados, a tela avisa e pede de novo. A recuperação de senha por e-mail não
+   está ativada: se esqueceu a senha, procure um Gestor.
+4. No topo da tela ficam o seu nome e o seu perfil (por exemplo, "Gestor"). Clique em **Sair** para
+   encerrar a sessão; o sistema volta ao login.
+5. Enquanto você usa o sistema, a sessão é renovada sozinha. Se ela terminar, o sistema volta ao
+   login e basta entrar de novo.
+
+### Perfis de acesso
+
+Cada pessoa tem um ou mais perfis, que definem o que ela vê e o que pode fazer:
+
+| Perfil | Em resumo |
+|---|---|
+| **Operador de dados** | Importa e processa dados: fontes, arquivos, mapeamentos, quarentena e cálculo de indicadores |
+| **Analista** | Consulta o mapa, os imóveis, os indicadores e a rastreabilidade, sem alterar dados |
+| **Auditor** | Acompanha fontes, quarentena, indicadores e rastreabilidade, sem alterar dados |
+| **Gestor** | Acesso total, inclusive a gestão de usuários e perfis |
+
+O que cada perfil acessa (✔ = pode, — = não aparece):
+
+| Área | Operador de dados | Analista | Auditor | Gestor |
+|---|:---:|:---:|:---:|:---:|
+| Fontes de dados: consultar | ✔ | — | ✔ | ✔ |
+| Fontes de dados: importar, coletar, processar, mapear colunas, excluir | ✔ | — | — | ✔ |
+| Quarentena: consultar | ✔ | — | ✔ | ✔ |
+| Quarentena: analisar, corrigir, revalidar, descartar | ✔ | — | — | ✔ |
+| Imóveis rurais: mapa, tabela e indicadores | ✔ | ✔ | ✔ | ✔ |
+| Imóveis rurais: calcular e recalcular indicadores | ✔ | — | — | ✔ |
+| Rastreabilidade | ✔ | ✔ | ✔ | ✔ |
+| Usuários e perfis | — | — | — | ✔ |
+
+- O **menu** mostra só as telas do seu perfil. Os botões que alteram dados (por exemplo **Processar**,
+  **Excluir**, **Salvar mapeamento**) só aparecem para Operador de dados e Gestor.
+- Se você digitar o endereço de uma tela que o seu perfil não vê, o sistema leva você a uma tela
+  permitida.
+- Se aparecer **"Sem acesso a nenhuma área"**, a sua conta entrou, mas ainda não tem nenhum perfil.
+  Peça a um Gestor para atribuir um (veja [Usuários e perfis](#usuários-e-perfis)) e entre de novo.
 
 ### Visão geral da tela
 
-A navegação fica no **menu lateral**, dividido em três grupos:
+A navegação fica no **menu lateral**, dividido em grupos. Você vê só as telas liberadas ao seu
+perfil (veja [Perfis de acesso](#perfis-de-acesso)):
 
 | Grupo | Tela | Para quê |
 |---|---|---|
@@ -328,9 +473,10 @@ A navegação fica no **menu lateral**, dividido em três grupos:
 | Dados | **Quarentena** | Analisar e tratar os registros reprovados |
 | Consulta | **Imóveis rurais** | Consultar os imóveis no mapa e na tabela, com os indicadores |
 | Governança | **Rastreabilidade** | Ver de onde veio o número de um indicador |
+| Administração | **Usuários e perfis** | Definir o que cada pessoa pode usar (somente Gestor) |
 
-No topo ficam o nome da tela e o botão **Modo claro / Modo escuro** (a escolha fica salva no
-navegador). Em telas estreitas, o menu mostra só os ícones.
+No topo ficam o nome da tela, o seu nome e perfil, o botão **Modo claro / Modo escuro** (a escolha
+fica salva no navegador) e o botão **Sair**. Em telas estreitas, o menu mostra só os ícones.
 
 ### Fontes de dados
 
@@ -511,8 +657,67 @@ Mostra o caminho completo de um indicador, do resultado até o arquivo de origem
 <img width="1362" height="670" alt="image" src="https://github.com/user-attachments/assets/bbff2b8a-9f8e-481c-b2ff-740328af29a8" />
 
 
+### Usuários e perfis
+
+<!-- TODO: print da tela Usuários e perfis e da gaveta de edição -->
+
+Tela usada pelo Gestor, em **Administração > Usuários e perfis**, para definir o que cada pessoa pode
+usar no sistema. Os demais perfis não veem este item no menu.
+
+**Passo a passo:**
+
+1. Abra **Administração > Usuários e perfis**. A lista mostra o nome, o usuário, o e-mail e os
+   perfis de cada pessoa, em etiquetas. Quem não tem nenhum perfil aparece como **Sem perfil**, e
+   contas desativadas trazem a marca "desativado".
+2. **Buscar:** digite no campo "Buscar por nome, usuário ou e-mail". A lista se atualiza sozinha
+   depois que você para de digitar. **Atualizar** recarrega a lista.
+3. A lista mostra 20 pessoas por página; use **Anterior** e **Próxima** para navegar.
+4. Clique em **Editar perfis** na linha da pessoa. Abre uma gaveta à direita com os quatro perfis, cada
+   um com uma explicação do que permite:
+   - **Operador de dados:** importa e processa dados (fontes, arquivos, mapeamentos, quarentena e
+     indicadores);
+   - **Analista:** consulta o mapa, os imóveis e os indicadores, sem alterar dados;
+   - **Auditor:** acompanha fontes, quarentena e rastreabilidade, sem alterar dados;
+   - **Gestor:** acesso total, inclusive a gestão de usuários.
+5. Marque ou desmarque os perfis. O botão **Salvar perfis** só fica ativo depois de uma mudança.
+   **Cancelar**, o **✕** e a tecla **Esc** fecham a gaveta sem salvar.
+6. Clique em **Salvar perfis**. A gaveta fecha, a linha da pessoa mostra os novos perfis e aparece o
+   aviso "Perfis de … atualizados".
+
+**Avisos importantes:**
+
+- **A sua própria linha:** o perfil **Gestor** fica travado. Você não pode remover o seu próprio
+  perfil de Gestor, para não perder o acesso ao sistema. Para isso, peça a outro Gestor.
+- **Sem nenhum perfil:** a gaveta avisa que a pessoa consegue entrar, mas não acessa nenhuma tela.
+- **Quando a mudança vale:** no próximo login da pessoa, ou em até 15 minutos se ela estiver
+  conectada. Peça a ela para sair e entrar de novo, se precisar da mudança na hora.
+- Esta tela **não cria** usuários nem altera senhas; veja [Limitações conhecidas](#limitações-conhecidas).
 
 
+## Mensagens comuns e o que fazer
+
+| Mensagem | O que significa | O que fazer |
+|---|---|---|
+| Volta para a tela de login, ou "Autenticação necessária: envie um token válido." | A sessão terminou | Entre de novo |
+| "Você não tem permissão para acessar este recurso." | O seu perfil não libera esta ação | Peça a um Gestor o perfil adequado |
+| "Sem acesso a nenhuma área" | A conta entrou, mas não tem perfil | Peça a um Gestor para atribuir um perfil e entre de novo |
+| Credenciais inválidas na tela de login | Usuário ou senha incorretos | Confira os dados; se esqueceu a senha, procure um Gestor |
+| "Não foi possível falar com o servidor. Ele está rodando?" | O back-end não respondeu | Confirme que o back-end está no ar (veja [Como instalar e rodar](#como-instalar-e-rodar)) |
+| "Você não pode remover o seu próprio perfil de Gestor." | Tentativa de tirar o próprio perfil de Gestor | Peça a outro Gestor, se for mesmo necessário |
+| "O serviço de autenticação está indisponível. Tente novamente em instantes." | O Keycloak está fora do ar | Confirme que o container `keycloak` está rodando e tente de novo |
+| "Usuário não encontrado" | A pessoa não existe mais no Keycloak | Atualize a lista; confirme com a equipe técnica |
 
 
+## Limitações conhecidas
 
+- **Criar usuários, desativá-los ou redefinir senhas** é feito no painel de administração do Keycloak
+  (`http://localhost:8081/admin/master/console/`), não pela tela **Usuários e perfis**, que só
+  define perfis de quem já existe.
+- A mudança de perfil vale no **próximo login** (ou em até 15 minutos).
+- Os perfis liberam telas e ações **para todos os dados**: ainda não há restrição por município nem
+  permissões mais finas dentro de cada perfil (previstas para uma próxima etapa).
+- A distribuição de permissões por perfil é a configuração atual e ainda será validada com o Product
+  Owner; pode mudar.
+- A recuperação de senha por e-mail e o cadastro por conta própria estão desativados.
+- A lista de usuários não mostra o total, apenas as páginas de 20 em 20.
+- Os usuários de teste e as senhas padrão servem só para desenvolvimento.
