@@ -208,3 +208,9 @@ def test_etapa_soma_os_blocos_rapidos_sem_zerar(monkeypatch):
             pass
 
     assert round(resumo.tempos["gravacao"], 1) == 0.5  # arredondando a cada bloco daria 0.0
+
+
+def test_conexao_le_5000_linhas_por_ida_ao_banco():
+    import oracledb
+    from georural import banco
+    assert oracledb.defaults.arraysize == oracledb.defaults.prefetchrows == banco.LINHAS_POR_IDA == 5000
