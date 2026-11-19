@@ -11,6 +11,14 @@ from georural.config import Config
 # números e _ — nada que permita injetar comando.
 _IDENTIFICADOR = re.compile(r"^[A-Za-z][A-Za-z0-9_$#]{0,127}$")
 
+# Linhas por ida ao banco em toda consulta (o padrão do driver é 100). A carga lê tabelas inteiras
+# (o que a Tratada já tem, a fila da quarentena, os imóveis da referência cruzada): no PRODES, as
+# 166 mil linhas da input_feature caíram de 7–12 s para ~2,5 s (US13.T23). Consulta de uma linha
+# não muda. As DAGs de indicador já pediam 5000 no próprio cursor.
+LINHAS_POR_IDA = 5000
+oracledb.defaults.arraysize = LINHAS_POR_IDA
+oracledb.defaults.prefetchrows = LINHAS_POR_IDA
+
 
 @contextmanager
 def conectar(cfg: Config):
