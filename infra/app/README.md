@@ -1,25 +1,31 @@
 # Deploy da aplicacao
 
-GeoRural DataHub (back + front + banco) em `docker compose`, na mesma VM Ampere A1
-(**aarch64**) da OCI que roda o Airflow, dentro de `~/atlaz4-app`. O deploy e manual:
-alguem do grupo entra na VM e roda `./deploy.sh`.
+GeoRural DataHub (back + front + Keycloak) em `docker compose`, na mesma VM da OCI que roda o
+Airflow, dentro de `~/georural-app`. O banco e o **Autonomous Database** da OCI, o mesmo que o
+Airflow usa. O deploy e automatico: todo merge na `dev` do back ou do front dispara o workflow
+**Deploy** no GitHub Actions, que entra na VM por SSH e roda o `./deploy.sh`. Tambem da para
+rodar na mao, de dentro da VM.
 
 ```
-navegador ──> :8081 nginx (front) ──/api──> backend :8080 ──> oracle :1521
-                                                 └──> Object Storage (zona bruta)
+                 443 (HTTPS, Caddy no host)
+   georural.<dominio> ──> :8081 nginx (front) ──/api──> backend :8080 ──> Autonomous Database
+   auth.<dominio>     ──> :8180 Keycloak ──> Postgres     │  │
+                                                          │  └──> Object Storage (zona bruta)
+                                rede Docker "georural" ───┴──> airflow-apiserver (infra/airflow)
 ```
 
-So a porta do front fica aberta para fora. Back e banco escutam apenas em `127.0.0.1`.
+Nada do compose escuta para fora: front, back e Keycloak ficam em `127.0.0.1` e o Caddy publica
+em HTTPS. Na Security List da OCI ficam abertas so as portas 22, 80 e 443.
 
 ## Arquivos
 
 | Arquivo | O que e |
 |---|---|
-| `docker-compose.yaml` | Os tres containers e o volume do banco |
+| `docker-compose.yaml` | Back, front, Keycloak e o Postgres do Keycloak |
 | `backend.Dockerfile` | Build do Spring Boot com Java 17 |
-| `frontend.Dockerfile` | Build do Vue + nginx |
+| `frontend.Dockerfile` | Build do Vue + nginx (recebe o endereco do Keycloak no build) |
 | `nginx.conf` | Serve o front e repassa `/api` para o back |
-| `deploy.sh` | Baixa o codigo, gera as imagens e sobe tudo |
+| `deploy.sh` | Baixa o codigo, gera o realm do Keycloak, cria a rede e sobe tudo |
 | `.env.example` | Modelo do `.env`. O `.env` real fica so na VM |
 
 O codigo do back e do front **nao** vem daqui: o `deploy.sh` clona os repositorios
@@ -36,23 +42,13 @@ echo "ssh-ed25519 AAAA... nome-da-pessoa" >> ~/.ssh/authorized_keys
 
 ## Primeira vez (uma pessoa so)
 
-**1. Liberar a porta do site.** Duas camadas, as duas sao necessarias:
+**1. Pre-requisitos na OCI.** Autonomous Database com o IP da VM na lista de acesso e o mTLS
+desligado, usuario `GEO_RURAL` criado, bucket da zona bruta e o Airflow ja no ar
+(`infra/airflow/README.md`).
 
-- **OCI:** na subnet da VM, Security List → Add Ingress Rule → origem `0.0.0.0/0`,
-  TCP, porta `8081`.
-- **Firewall da VM:**
-  ```bash
-  # Oracle Linux
-  sudo firewall-cmd --permanent --add-port=8081/tcp && sudo firewall-cmd --reload
-  # Ubuntu (imagem da OCI vem com iptables fechado)
-  sudo iptables -I INPUT 6 -p tcp --dport 8081 -j ACCEPT && sudo netfilter-persistent save
-  ```
-
-**2. Conferir memoria.** O Oracle Free usa ~2 GB. Com o Airflow junto, veja `free -h`
-antes. Se sobrar pouco, aumente a VM (a A1 gratis vai ate 24 GB).
-
-**3. Credencial da OCI.** O back usa `~/.oci/config` + chave API (perfil `DEFAULT`,
-regiao `sa-saopaulo-1`). Precisa existir na VM, no usuario que roda o deploy:
+**2. Credencial da OCI.** O back usa `~/.oci/config` + chave API (perfil `DEFAULT`). Use um
+usuario tecnico da OCI, nunca a chave de uma pessoa. Precisa existir na VM, no usuario que roda
+o deploy:
 
 ```bash
 ls ~/.oci          # config e o .pem
@@ -63,74 +59,90 @@ Se o `config` veio de um PC Windows, corrija o `key_file`: `C:\Users\...\oci_api
 nao existe na VM e o back nao sobe (`Could not find private key`). Use
 `key_file=~/.oci/oci_api_key.pem`.
 
+**3. Dominio e HTTPS.** O Keycloak so aceita login por HTTPS fora de `localhost`. Sem dominio
+proprio, use o sslip.io (`georural.<IP-com-tracos>.sslip.io`), que nao precisa de configuracao.
+Em `/etc/caddy/Caddyfile`:
+
+```
+georural.<dominio> {
+    reverse_proxy localhost:8081
+}
+auth.<dominio> {
+    reverse_proxy localhost:8180
+}
+```
+
+```bash
+sudo systemctl reload caddy      # o certificado sai sozinho (portas 80 e 443 abertas)
+```
+
 **4. Baixar e configurar:**
 
 ```bash
-git clone https://github.com/AtlazDB/Atlaz4.git ~/atlaz4-repo
-ln -s ~/atlaz4-repo/infra/app ~/atlaz4-app
-cd ~/atlaz4-app
+git clone https://github.com/AtlazDB/GeoRural-DataHub.git ~/georural-repo
+ln -s ~/georural-repo/infra/app ~/georural-app
+cd ~/georural-app
 cp .env.example .env
-nano .env          # senhas, OCI_NAMESPACE, OCI_BUCKET, IP publico
+nano .env          # cada variavel diz de onde tirar o valor
 chmod 600 .env
-chmod +x deploy.sh
 ```
 
 **5. Subir:**
 
 ```bash
 ./deploy.sh
-```
-
-A primeira vez demora (baixa imagens, dependencias do Maven e do npm, e o Oracle cria
-o banco). O back so inicia quando o banco fica saudavel. Acompanhe:
-
-```bash
 docker compose logs -f backend   # espere "Started GeoRuralApplication"
 ```
 
-Pronto: `http://IP_PUBLICO_DA_VM:8081`.
+Na primeira vez o Flyway cria as tabelas no `GEO_RURAL`. Depois disso, de os GRANTs ao usuario
+do Airflow, se ele for separado.
+
+**6. Primeiro usuario.** O realm de producao nasce **sem** os usuarios de teste do back
+(`operador`, `gestor`... com senha conhecida). Entre em `https://auth.<dominio>` com
+`KEYCLOAK_ADMIN`, troque para o realm **georural**, crie o seu usuario em *Users* e de o perfil
+`GESTOR` em *Role mapping*. Os demais usuarios podem ser criados pela propria aplicacao.
+
+Pronto: `https://georural.<dominio>`.
 
 ## Atualizar (qualquer pessoa do grupo)
 
+O GitHub Actions faz isso a cada merge na `dev`. Na mao:
+
 ```bash
 ssh usuario@IP_PUBLICO_DA_VM
-cd ~/atlaz4-repo && git pull     # so se mudou algo em infra/app
-cd ~/atlaz4-app && ./deploy.sh
+cd ~/georural-repo && git pull     # so se mudou algo em infra/app
+cd ~/georural-app && ./deploy.sh
 ```
 
 O `build` roda com o site no ar. A indisponibilidade e so o reinicio do back
-(~30 s). O banco nao reinicia se a imagem dele nao mudou.
+(~30 s).
 
 ## Comandos uteis
 
-Sempre de dentro de `~/atlaz4-app`:
+Sempre de dentro de `~/georural-app`:
 
 ```bash
 docker compose ps                  # o que esta rodando
 docker compose logs -f backend     # logs do back
+docker compose logs -f keycloak    # logs do login
 docker compose restart backend     # reinicia so o back
-```
-
-Acessar o banco pelo DBeaver/IntelliJ do seu PC (tunel SSH):
-
-```bash
-ssh -L 1521:localhost:1521 usuario@IP_PUBLICO_DA_VM
-# conecte em localhost:1521/FREEPDB1 com DB_USERNAME / DB_PASSWORD
 ```
 
 ## Armadilhas conhecidas
 
-- **Senhas do banco so valem na primeira subida.** Depois o Oracle ja criou os
-  usuarios dentro do volume `oracle-data`; mudar o `.env` nao troca a senha.
-- **`docker compose down -v` apaga o banco inteiro.** Use `down` sem `-v`.
-- **Nao ha login na aplicacao.** Quem tiver o endereco pode cadastrar e apagar
-  fontes. Nao divulgue o IP fora do grupo.
+- **O realm so e importado na primeira subida do Keycloak.** Mudancas no
+  `keycloak/georural-realm.json` do back nao chegam sozinhas a producao: faca pelo console.
+  O mesmo vale para `KEYCLOAK_ADMIN_PASSWORD` e `KEYCLOAK_BACKEND_SECRET` depois da primeira vez.
+- **`docker compose down -v` apaga os usuarios do Keycloak.** Use `down` sem `-v`.
+- **`SITE_URL` e `AUTH_URL` precisam bater com o Caddyfile**, com `https://` e sem barra no fim.
+  O back recusa tokens cujo emissor nao seja `AUTH_URL/realms/georural`.
+- **Trocar o `AUTH_URL` exige novo build do front**, porque o endereco do Keycloak vai para o
+  JavaScript no build. O `./deploy.sh` ja faz isso.
 - **A VM usa Instance Principal, mas o back nao.** O Airflow autentica na OCI sem
-  chave em disco; o back so sabe ler `~/.oci/config`. Por isso o passo 3.
+  chave em disco; o back so sabe ler `~/.oci/config`. Por isso o passo 2.
 
 ## Pendencias
 
 - [ ] Fazer o back aceitar Instance Principal (fallback quando nao houver
-      `~/.oci/config`), para nao depender de chave de uma pessoa na VM.
-- [ ] Publicar em HTTPS pelo Caddy que ja existe na VM (`reverse_proxy localhost:8081`).
-- [ ] Backup do volume `oracle-data`.
+      `~/.oci/config`), para nao depender de chave em disco na VM.
+- [ ] Backup periodico do schema `GEO_RURAL` (Data Pump) e do banco do Keycloak fora da OCI.

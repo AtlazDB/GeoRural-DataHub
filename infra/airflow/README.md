@@ -21,7 +21,7 @@ com Airflow 3.3.1 em `docker compose`, dentro de `~/airflow`.
 Precisa do Docker Desktop. O Airflow roda num container e usa o **Oracle local** do
 back-end e o **bucket real** da OCI (com a sua chave da API, a mesma do back-end).
 
-1. Suba o Oracle local: `cd Atlaz4-BackEnd && docker compose up -d`
+1. Suba o Oracle local: `cd GeoRural-DataHub-BackEnd && docker compose up -d`
 2. Rode o back-end uma vez (`mvnw spring-boot:run`) para o Flyway criar as tabelas
 3. Aqui em `infra/airflow`: `cp .env.local.example .env.local` e preencha
 4. Suba o Airflow:
@@ -156,30 +156,32 @@ Oracle local. A UI **nao fica exposta na internet**: escuta so em `127.0.0.1` da
 ```bash
 sudo apt update && sudo apt install -y docker.io docker-compose-v2 git
 sudo usermod -aG docker $USER        # saia e entre de novo no SSH
-git clone https://github.com/AtlazDB/Atlaz4.git ~/Atlaz4 && cd ~/Atlaz4/infra/airflow
+git clone https://github.com/AtlazDB/GeoRural-DataHub.git ~/georural-repo && cd ~/georural-repo/infra/airflow
 cp .env.example .env && nano .env    # cada variavel diz de onde tirar o valor
 mkdir -p logs config
+docker network create georural        # rede compartilhada com o back; ignore "already exists"
 docker compose up -d --build
 ```
 
 **3. Conferir**
 ```bash
 ssh -L 8088:localhost:8088 ubuntu@<IP da VM>      # do seu computador
-cat ~/Atlaz4/infra/airflow/config/simple_auth_manager_passwords.json.generated   # senha do admin
+cat ~/georural-repo/infra/airflow/config/simple_auth_manager_passwords.json.generated   # senha do admin
 ```
 Abra http://localhost:8088, rode a DAG `teste_conexoes` (as duas tarefas verdes = Autonomous e
 bucket funcionando). As DAGs `processar_arquivo`, `coletar_fonte` e `revalidar_registro` ja nascem ativas.
-O back-end dispara as DAGs pela API REST: a VM do back-end precisa alcancar a do Airflow (rede privada,
-nunca a porta aberta na internet), com `AIRFLOW_URL`, `AIRFLOW_USUARIO` e `AIRFLOW_SENHA` no `.env` dela.
+O back-end dispara as DAGs pela API REST. Os dois rodam na mesma VM e se enxergam pela rede Docker
+`georural`: no `.env` do `infra/app`, `AIRFLOW_URL=http://airflow-apiserver:8080`, `AIRFLOW_USUARIO=admin`
+e `AIRFLOW_SENHA` com a senha acima. A porta do Airflow nunca fica aberta na internet.
 
 ## Como aplicar uma mudanca
 
-Sempre de dentro de `~/Atlaz4/infra/airflow` na VM (antes era `~/airflow`, na VM antiga). Fora dela o compose responde
+Sempre de dentro de `~/georural-repo/infra/airflow` na VM (antes era `~/airflow`, na VM antiga). Fora dela o compose responde
 `no configuration file provided: not found`, e o erro vem enterrado embaixo de
 varios avisos de `FERNET_KEY` — da pra achar que o comando funcionou.
 
 ```bash
-cd ~/Atlaz4/infra/airflow
+cd ~/georural-repo/infra/airflow
 git pull
 docker compose up -d --build   # ~1 min de indisponibilidade
 ```
@@ -187,7 +189,7 @@ docker compose up -d --build   # ~1 min de indisponibilidade
 Conferir que as bibliotecas subiram:
 
 ```bash
-cd ~/Atlaz4/infra/airflow && docker compose exec airflow-scheduler \
+cd ~/georural-repo/infra/airflow && docker compose exec airflow-scheduler \
   python -c "import geopandas,shapely,pyproj,pyogrio,requests,oci;print('ok',geopandas.__version__)"
 ```
 

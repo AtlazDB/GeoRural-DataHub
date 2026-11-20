@@ -330,7 +330,7 @@ precisam estar rodando para usar a aplicação por completo.
 **Pré-requisitos:** JDK 17, Docker Desktop, Git e uma credencial válida da Oracle Cloud (OCI) para
 o Object Storage.
 
-1. Clone o repositório `Atlaz4-BackEnd`.
+1. Clone o repositório `GeoRural-DataHub-BackEnd`.
 2. Copie o `.env.example` para `.env`, na raiz do projeto, e preencha `OCI_NAMESPACE`,
    `OCI_BUCKET`, `DB_USERNAME` e `DB_PASSWORD`. Para processar e coletar, suba também o Airflow
    (`infra/airflow/README.md` deste repositório). O login usa valores padrão de desenvolvimento;
@@ -361,7 +361,7 @@ o Object Storage.
 
 **Pré-requisitos:** Node.js 18 ou mais recente e npm 9 ou mais recente.
 
-1. Clone o repositório `Atlaz4-FrontEnd`.
+1. Clone o repositório `GeoRural-DataHub-FrontEnd`.
 2. Instale as dependências: `npm install`.
 3. Copie o `.env.example` para `.env.development`.
 4. Edite o `.env.development` e defina, com o back-end e o Keycloak já rodando:

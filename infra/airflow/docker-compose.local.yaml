@@ -4,7 +4,7 @@
 # Não é para produção: na VM o Airflow roda com o docker-compose.yaml completo.
 #
 # Pré-requisitos:
-#   1. Oracle local no ar:  cd Atlaz4-BackEnd && docker compose up -d
+#   1. Oracle local no ar:  cd GeoRural-DataHub-BackEnd && docker compose up -d
 #   2. .env.local preenchido (copie de .env.local.example)
 #
 # Subir:   docker compose -f docker-compose.local.yaml --env-file .env.local up --build
