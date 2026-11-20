@@ -1,2 +1,4 @@
 .env
 src/
+# Gerado pelo deploy.sh
+keycloak-import/

@@ -2,9 +2,10 @@
 #
 # No PC use o docker-compose.local.yaml (um container só, Oracle local).
 #
-# Primeira vez, de dentro de ~/Atlaz4/infra/airflow:
+# Primeira vez, de dentro de ~/georural-repo/infra/airflow:
 #   cp .env.example .env            # e preencha (cada variável diz de onde tirar o valor)
 #   mkdir -p logs config            # pastas montadas nos containers, do seu usuário
+#   docker network create georural  # rede compartilhada com o back (ignore "already exists")
 #   docker compose up -d --build
 #
 # Abrir a UI: ela NÃO fica exposta na internet (só 127.0.0.1 da VM). Do seu computador:
@@ -81,6 +82,11 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
+    # "georural": rede compartilhada com o back (infra/app), que chama a API REST por
+    # http://airflow-apiserver:8080 para disparar as DAGs.
+    networks:
+      - default
+      - georural
     mem_limit: 1536m
 
   # Com o LocalExecutor, as tarefas (coleta e processamento) rodam dentro do scheduler:
@@ -100,6 +106,11 @@ services:
       airflow-init:
         condition: service_completed_successfully
     mem_limit: 1g
+
+networks:
+  # Criada uma vez na VM (o deploy.sh do infra/app tambem cria):  docker network create georural
+  georural:
+    external: true
 
 volumes:
   postgres-data:

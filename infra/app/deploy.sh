@@ -19,12 +19,18 @@ set +a
 : "${OCI_CONFIG_DIR:=$HOME/.oci}"
 export OCI_CONFIG_DIR
 
-for var in DB_ADMIN_PASSWORD DB_USERNAME DB_PASSWORD OCI_NAMESPACE OCI_BUCKET; do
+for var in SITE_URL AUTH_URL SPRING_DATASOURCE_URL DB_USERNAME DB_PASSWORD OCI_NAMESPACE OCI_BUCKET \
+           KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_BACKEND_SECRET; do
     if [ -z "${!var:-}" ]; then
         echo "Variavel $var vazia no .env." >&2
         exit 1
     fi
 done
+
+if [ "$KEYCLOAK_BACKEND_SECRET" = "georural-backend-dev-secret" ]; then
+    echo "KEYCLOAK_BACKEND_SECRET ainda e o de desenvolvimento. Gere outro: openssl rand -hex 24" >&2
+    exit 1
+fi
 
 if [ ! -f "$OCI_CONFIG_DIR/config" ]; then
     echo "Nao achei $OCI_CONFIG_DIR/config (o back precisa dele para o Object Storage)." >&2
@@ -45,8 +51,36 @@ atualizar() {
 }
 
 echo "Baixando codigo..."
-atualizar https://github.com/AtlazDB/Atlaz4-BackEnd.git src/backend "$BACK_BRANCH"
-atualizar https://github.com/AtlazDB/Atlaz4-FrontEnd.git src/frontend "$FRONT_BRANCH"
+atualizar https://github.com/AtlazDB/GeoRural-DataHub-BackEnd.git src/backend "$BACK_BRANCH"
+atualizar https://github.com/AtlazDB/GeoRural-DataHub-FrontEnd.git src/frontend "$FRONT_BRANCH"
+
+# Realm de producao, a partir do de desenvolvimento do back: sai quem tem senha conhecida
+# (operador, analista... com georural123) e o front passa a aceitar o endereco publico.
+# So e importado na primeira subida do Keycloak; depois disso, mudancas sao pelo console.
+echo "Gerando o realm do Keycloak..."
+mkdir -p keycloak-import
+python3 - src/backend/keycloak/georural-realm.json keycloak-import/georural-realm.json "$SITE_URL" <<'PY'
+import json, sys
+
+origem, destino, site = sys.argv[1], sys.argv[2], sys.argv[3].rstrip("/")
+with open(origem, encoding="utf-8") as f:
+    realm = json.load(f)
+
+realm["users"] = [u for u in realm.get("users", [])
+                  if u.get("username", "").startswith("service-account-")]
+
+for client in realm["clients"]:
+    if client["clientId"] == "georural-frontend":
+        client["redirectUris"] = [site + "/*"]
+        client["webOrigins"] = [site]
+        client.setdefault("attributes", {})["post.logout.redirect.uris"] = site + "/*"
+
+with open(destino, "w", encoding="utf-8") as f:
+    json.dump(realm, f, ensure_ascii=False, indent=2)
+PY
+
+# Rede compartilhada com o Airflow (infra/airflow): o back chama o airflow-apiserver por ela.
+docker network inspect georural >/dev/null 2>&1 || docker network create georural >/dev/null
 
 echo "Gerando imagens (o site continua no ar)..."
 docker compose build

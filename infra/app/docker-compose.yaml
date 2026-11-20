@@ -1,45 +1,37 @@
-# GeoRural DataHub em producao: Oracle + back (Spring Boot) + front (Vue servido pelo nginx).
+# GeoRural DataHub em producao: back (Spring Boot) + front (Vue servido pelo nginx) + Keycloak.
+# O banco e o Autonomous Database da OCI (o mesmo do Airflow): nao ha Oracle local aqui.
 # Nao rode "docker compose" direto na primeira vez: use ./deploy.sh, que baixa o codigo
-# do back e do front para src/ antes do build.
+# do back e do front para src/, gera o realm do Keycloak e cria a rede compartilhada.
+#
+# Nada escuta para fora da VM: o Caddy do host publica o site e o login em HTTPS
+#   georural.<dominio> -> 127.0.0.1:${APP_PORT}   (front)
+#   auth.<dominio>     -> 127.0.0.1:8180          (Keycloak)
 
 services:
-  oracle:
-    image: gvenzl/oracle-free:23
-    container_name: atlaz4-oracle
-    environment:
-      - ORACLE_PASSWORD=${DB_ADMIN_PASSWORD}
-      - APP_USER=${DB_USERNAME}
-      - APP_USER_PASSWORD=${DB_PASSWORD}
-    # So na propria VM: para acessar do seu PC use tunel SSH (ver README).
-    ports:
-      - '127.0.0.1:1521:1521'
-    volumes:
-      - oracle-data:/opt/oracle/oradata
-    healthcheck:
-      test: ['CMD', 'healthcheck.sh']
-      interval: 10s
-      timeout: 5s
-      retries: 60
-      start_period: 60s
-    restart: unless-stopped
-
   backend:
     build:
       context: .
       dockerfile: backend.Dockerfile
-    container_name: atlaz4-backend
+    container_name: georural-backend
     environment:
-      - SPRING_DATASOURCE_URL=jdbc:oracle:thin:@oracle:1521/FREEPDB1
+      # Autonomous Database: jdbc:oracle:thin:@ + a string TLS do servico _tp (ver .env.example).
+      - SPRING_DATASOURCE_URL=${SPRING_DATASOURCE_URL:?defina no .env}
       - DB_USERNAME=${DB_USERNAME}
       - DB_PASSWORD=${DB_PASSWORD}
       - OCI_NAMESPACE=${OCI_NAMESPACE}
       - OCI_BUCKET=${OCI_BUCKET}
       - OCI_ZONA_BRUTA=${OCI_ZONA_BRUTA:-bruta}
-      - APP_CORS_ORIGENS=${APP_CORS_ORIGENS:-http://localhost:*}
-      # Os botoes disparam as DAGs pela API REST do Airflow.
-      - AIRFLOW_URL=${AIRFLOW_URL:-http://localhost:8088}
+      - APP_CORS_ORIGENS=${SITE_URL:?defina no .env}
+      # Os botoes disparam as DAGs pela API REST do Airflow, pela rede "georural".
+      - AIRFLOW_URL=${AIRFLOW_URL:-http://airflow-apiserver:8080}
       - AIRFLOW_USUARIO=${AIRFLOW_USUARIO:-}
       - AIRFLOW_SENHA=${AIRFLOW_SENHA:-}
+      # O token vem com o endereco publico do Keycloak no "iss": e esse que o back confere.
+      # As chaves de assinatura ele busca por dentro, sem sair da VM.
+      - SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI=${AUTH_URL:?defina no .env}/realms/georural
+      - SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI=http://keycloak:8080/realms/georural/protocol/openid-connect/certs
+      - KEYCLOAK_URL=http://keycloak:8080
+      - KEYCLOAK_BACKEND_SECRET=${KEYCLOAK_BACKEND_SECRET:?defina no .env}
     # O back le ~/.oci/config (ConfigFileAuthenticationDetailsProvider). A pasta e montada
     # em /root/.oci e tambem no caminho original, para o key_file do config funcionar
     # tanto com "~/.oci/..." quanto com caminho absoluto.
@@ -48,21 +40,81 @@ services:
       - ${OCI_CONFIG_DIR}:${OCI_CONFIG_DIR}:ro
     ports:
       - '127.0.0.1:8090:8080'
-    depends_on:
-      oracle:
-        condition: service_healthy
+    networks:
+      - default
+      - georural
     restart: unless-stopped
 
   frontend:
     build:
       context: .
       dockerfile: frontend.Dockerfile
-    container_name: atlaz4-frontend
+      # O Vite grava estes valores no JavaScript durante o build.
+      args:
+        VITE_KEYCLOAK_URL: ${AUTH_URL}
+        VITE_KEYCLOAK_REALM: georural
+        VITE_KEYCLOAK_CLIENT_ID: georural-frontend
+    container_name: georural-frontend
     ports:
-      - '${APP_PORT:-8081}:80'
+      - '127.0.0.1:${APP_PORT:-8081}:80'
     depends_on:
       - backend
     restart: unless-stopped
 
+  # Login e perfis (US10). Modo "start" (producao): HTTPS e feito pelo Caddy na frente.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.0
+    container_name: georural-keycloak
+    # O realm so e importado se ainda nao existir: depois disso o que vale e o banco do Keycloak.
+    command: start --import-realm
+    environment:
+      - KC_HOSTNAME=${AUTH_URL}
+      - KC_PROXY_HEADERS=xforwarded
+      - KC_HTTP_ENABLED=true
+      - KC_HEALTH_ENABLED=true
+      - KC_DB=postgres
+      - KC_DB_URL=jdbc:postgresql://keycloak-db/keycloak
+      - KC_DB_USERNAME=keycloak
+      - KC_DB_PASSWORD=${KEYCLOAK_DB_PASSWORD:?defina no .env}
+      # Admin do console (realm master). So vale na primeira subida, com o banco vazio.
+      - KC_BOOTSTRAP_ADMIN_USERNAME=${KEYCLOAK_ADMIN:-admin}
+      - KC_BOOTSTRAP_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:?defina no .env}
+      # Substitui o ${KEYCLOAK_BACKEND_SECRET} do realm na importacao.
+      - KEYCLOAK_BACKEND_SECRET=${KEYCLOAK_BACKEND_SECRET}
+    volumes:
+      # Gerado pelo deploy.sh a partir do realm do back (sem usuarios de teste, com o endereco do site).
+      - ./keycloak-import:/opt/keycloak/data/import:ro
+      # Tema da tela de login (T29), direto do repositorio do back.
+      - ./src/backend/keycloak-theme:/opt/keycloak/themes:ro
+    ports:
+      - '127.0.0.1:8180:8080'
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  keycloak-db:
+    image: postgres:16-alpine
+    container_name: georural-keycloak-db
+    environment:
+      - POSTGRES_DB=keycloak
+      - POSTGRES_USER=keycloak
+      - POSTGRES_PASSWORD=${KEYCLOAK_DB_PASSWORD}
+    volumes:
+      - keycloak-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-U', 'keycloak']
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+    mem_limit: 512m
+
+networks:
+  # Compartilhada com o Airflow (infra/airflow): o back chama o airflow-apiserver pelo nome.
+  # O deploy.sh cria a rede se ela nao existir.
+  georural:
+    external: true
+
 volumes:
-  oracle-data:
+  # Usuarios, perfis e sessoes do Keycloak. "docker compose down -v" apaga todos.
+  keycloak-db-data:
