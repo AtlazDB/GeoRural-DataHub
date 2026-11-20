@@ -97,8 +97,8 @@ Se você trabalha com o back e o front em outras pastas, ou sobe o back com outr
 * 📃 [**Checklist DoR & DoD**](./Documentacao/Processo/Checklist/README.md) - Critérios de início e conclusão de tarefas.
 * 🌳 [**Estratégia de Branch & Commits**](./Documentacao/Governanca/README.md) - Fluxo de trabalho no GitHub.
 * 📑 [**Manual de Usuário**](./Manual%20de%20usu%C3%A1rio.md) - Manual da aplicação.
-* 📑 [**Manual de instalação backend**](https://github.com/AtlazDB/Atlaz4-FrontEnd/edit/dev/README.md) - Rodar backend
-* 📑 [**Manual de instalação frontend**](https://github.com/AtlazDB/Atlaz4-BackEnd/edit/main/README.md) - Rodar Frontend
+* 📑 [**Manual de instalação backend**](https://github.com/AtlazDB/GeoRural-DataHub-BackEnd/blob/dev/README.md) - Rodar backend
+* 📑 [**Manual de instalação frontend**](https://github.com/AtlazDB/GeoRural-DataHub-FrontEnd/blob/dev/README.md) - Rodar Frontend
 
 ## Equipe
 
