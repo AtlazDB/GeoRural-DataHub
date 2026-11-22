@@ -49,6 +49,8 @@ def test_obrigatorio_separa_ausente_de_em_branco():
     ("DATA", None, ["01/02/2020", "29/02/2024"], ["1/2/2020", "31/02/2020", "2020-02-01"]),
     ("DATA", "YYYY/MM/DD HH24:MI:SS|DD/MM/YYYY HH24:MI:SS",
      ["2015/03/11 17:19:00", "11/12/2025 17:11:00"], ["2015-03-11 17:19:00", "11/12/2025"]),
+    ("DATA", 'YYYY-MM-DD"T"HH24:MI:SS"Z"',
+     ["2026-11-03T16:45:00Z"], ["2026-11-03 16:45:00", "2026-11-03T16:45:00", "03/11/2026"]),
     ("DATA", "EPOCH_MS", ["1700000000000"], ["-5", "1.5", "1234567890123456"]),
 ])
 def test_tipo_de_dado(tipo, formato, bons, ruins):
@@ -67,6 +69,16 @@ def test_tipo_nao_confere_vazio_nem_falso_nulo():
 def test_mascara_de_data_desconhecida_e_erro_de_configuracao():
     with pytest.raises(regras.RegraInvalida):
         _validar([{"x": "2020"}], [_regra("x", "DATA", formato="YYYY-WW")])
+
+
+def test_mascara_com_aspas_sem_fechar_e_erro_de_configuracao():
+    with pytest.raises(regras.RegraInvalida):
+        _validar([{"x": "2020-01-01T"}], [_regra("x", "DATA", formato='YYYY-MM-DD"T')])
+
+
+def test_data_iso_converte_para_o_instante_informado():
+    regra = _regra("x", "DATA", formato='YYYY-MM-DD"T"HH24:MI:SS"Z"')
+    assert regras.converter("2026-11-03T16:45:00Z", regra) == datetime(2026, 11, 3, 16, 45, 0)
 
 
 # ------------------------------------------------------------------ chave e regressão

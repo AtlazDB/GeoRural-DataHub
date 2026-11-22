@@ -139,11 +139,19 @@ _TOKENS_DATA = [("YYYY", r"(?P<Y>\d{4})"), ("HH24", r"(?P<H>\d{2})"), ("MI", r"(
 
 
 def _mascara(mascara: str) -> re.Pattern:
-    """Máscara do Oracle com FX (exata) como expressão regular. Só os elementos que as fontes usam."""
-    padrao, resto = "", mascara.strip().upper()
+    """Máscara do Oracle com FX (exata) como expressão regular. Só os elementos que as fontes usam.
+    Texto entre aspas é literal, como no Oracle: YYYY-MM-DD"T"HH24:MI:SS"Z" lê a data ISO do INPE."""
+    padrao, resto = "", mascara.strip()
     while resto:
+        if resto[0] == '"':
+            fim = resto.find('"', 1)
+            if fim < 0:
+                raise RegraInvalida(f"Aspas sem fechar na máscara '{mascara}'.")
+            padrao += re.escape(resto[1:fim])
+            resto = resto[fim + 1:]
+            continue
         for token, grupo in _TOKENS_DATA:
-            if resto.startswith(token):
+            if resto.upper().startswith(token):
                 padrao += grupo
                 resto = resto[len(token):]
                 break
