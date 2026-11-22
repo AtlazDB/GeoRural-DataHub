@@ -37,6 +37,9 @@ x-airflow: &airflow
     PYTHONPATH: /opt/airflow/dags
     # Na VM da OCI o acesso ao bucket é pela própria VM (dynamic group + policy), sem chave em disco.
     GEORURAL_OCI_AUTH: instance_principal
+    # Processos da conta por imóvel nos indicadores (indicators.py). Cada um chega a ~5 GB com
+    # camadas grandes (vegetação nativa x CAR): 2 processos + o pai cabem no limite do scheduler.
+    GEORURAL_PROCESSOS: ${GEORURAL_PROCESSOS:-2}
   user: "${AIRFLOW_UID:-1000}:0"
   volumes:
     - ./dags:/opt/airflow/dags:ro
@@ -97,7 +100,10 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
-    mem_limit: 8g
+    # As tarefas (LocalExecutor) rodam dentro deste container. Com 8 GB o cálculo de indicador
+    # sobre a vegetação nativa e a APP era morto por falta de memória (SIGKILL). A VM tem 32 GB
+    # e o resto (back, front, Keycloak, Airflow) usa ~3 GB.
+    mem_limit: 20g
 
   airflow-dag-processor:
     <<: *airflow
