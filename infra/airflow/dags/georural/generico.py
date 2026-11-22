@@ -16,7 +16,8 @@ rodam aqui (regras.py) e os aprovados vão direto para a Zona Tratada (tratada.p
        se mudaram (hash), os reprovados na quarentena e as correções de geometria. Commit a cada
        bloco: o undo do Autonomous tem 1 GB
     5. no fim, na carga-retrato, apaga o que não veio mais; conclui (substituir_pendentes)
-    6. recalcula os indicadores que dependem do conjunto (IRL, IFC)
+    6. no CAR e nos municípios, preenche o município dos imóveis sem ele (municipalities.py)
+    7. recalcula os indicadores que dependem do conjunto (IRL, IFC)
 
 Se falhar no meio, os blocos já gravados ficam (estão certos), e a próxima carga só refaz o que
 falta: o que já entrou tem o mesmo hash e é pulado.
@@ -34,7 +35,7 @@ import numpy as np
 import oracledb
 import pandas as pd  # noqa: F401  (o desempate recebe um DataFrame)
 
-from georural import bucket, colunas, gravacao, irl_ifc, leitura, regras, sdo
+from georural import bucket, colunas, gravacao, irl_ifc, leitura, municipalities, regras, sdo
 from georural.banco import conectar
 from georural.config import Config
 from georural.tratada import Contagem, Tratada
@@ -93,6 +94,7 @@ class Resumo:
     quarentena_iguais: int = 0  # dentro de `invalidos`: já estavam na quarentena, não foram gravados de novo
     colunas_novas: int = 0
     indicadores: str | None = None
+    municipios_resolvidos: int | None = None  # imóveis que ganharam município (municipalities.py)
     # O que a carga fez na Tratada: só o que mudou é gravado.
     inseridos: int = 0
     alterados: int = 0
@@ -233,6 +235,10 @@ def processar(cfg: Config, arquivo_id: int, execucao_id: int) -> Resumo:
 
         # Nada mudou na Tratada: os indicadores continuam valendo.
         if resumo.inseridos or resumo.alterados or resumo.removidos:
+            # Antes dos indicadores: o resultado por município lê o municipio_id do imóvel.
+            if resumo.conjunto in municipalities.CONJUNTOS:
+                with _etapa(resumo, "municipios"):
+                    resumo.municipios_resolvidos = _resolver_municipios(con)
             with _etapa(resumo, "indicadores"):
                 resumo.indicadores = _recalcular_indicadores(con, resumo.conjunto, cfg.tamanho_lote)
     # Arredonda só no fim: arredondar a cada bloco zerava a etapa que leva milissegundos por bloco.
@@ -400,6 +406,17 @@ def _gravar_correcoes(cur, execucao_id: int, geometria: regras.Regra | None, blo
          "original": tipos.converter(c.geometria_original), "corrigida": tipos.converter(c.geometria_corrigida)}
         for c in v.correcoes.itertuples()
     ])
+
+
+def _resolver_municipios(con) -> int | None:
+    """Preenche o município dos imóveis sem ele, depois da carga já confirmada: se falhar, a
+    carga continua valendo (a DAG calcular_indicadores resolve de novo antes de calcular)."""
+    try:
+        return municipalities.resolve_municipalities(con)
+    except oracledb.DatabaseError as e:
+        con.rollback()
+        log.warning("Município dos imóveis não resolvido: %s", e)
+        return None
 
 
 def _recalcular_indicadores(con, conjunto: str | None, lote: int) -> str | None:
