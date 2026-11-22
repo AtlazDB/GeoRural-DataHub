@@ -4,19 +4,23 @@
 Recalcula o IRL e o IFC de todos os imóveis e grava em `indicador_imovel` (`georural/irl_ifc.py`,
 no lugar do `pkg_indicadores`). A carga (`processar_arquivo`) já recalcula sozinha quando o CAR, a
 Reserva Legal ou os focos mudam; esta DAG é para o "Calcular agora" da tela e para recalcular
-depois de uma falha.
+depois de uma falha. Antes de calcular, preenche o município dos imóveis que estão sem ele
+(`georural/municipalities.py`).
 
 Configuração do disparo (as duas opcionais):
 - `indicadores`: `["IRL"]`, `["IFC"]` ou os dois (padrão);
 - `referencia`: fim da janela do IFC em UTC, `"2026-11-04T12:00:00"` (padrão: agora).
 """
 
+import logging
 from datetime import datetime
 
 import pendulum
 from airflow.sdk import Param, dag, get_current_context, task
 
-from georural import config, irl_ifc
+from georural import banco, config, irl_ifc, municipalities
+
+log = logging.getLogger(__name__)
 
 
 @dag(
@@ -45,7 +49,12 @@ def calcular_indicadores():
         if desconhecidos:
             raise ValueError(f"Indicadores desconhecidos: {sorted(desconhecidos)} (use IRL e/ou IFC)")
         referencia = datetime.fromisoformat(params["referencia"]) if params.get("referencia") else None
-        return irl_ifc.calculate(config.carregar(), indicadores, referencia=referencia)
+        cfg = config.carregar()
+        # Antes de calcular: imóvel sem município cai em "Sem município" no resultado por município.
+        with banco.conectar(cfg) as con:
+            resolvidos = municipalities.resolve_municipalities(con)
+        log.info("Imóveis que ganharam município: %s", resolvidos)
+        return irl_ifc.calculate(cfg, indicadores, referencia=referencia)
 
     calcular()
 
