@@ -35,7 +35,7 @@ class CursorFalso:
         pass
 
     def execute(self, sql, **_binds):
-        if "user_tab_columns" in sql:
+        if "all_tab_columns" in sql:
             self._linhas = [(c,) for c in self.banco.colunas]
         else:
             self._linhas = self.banco.existentes
