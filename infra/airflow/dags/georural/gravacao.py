@@ -50,17 +50,20 @@ JUSTIFICATIVA_SEM_DADOS = "Descartado automaticamente: sem geometria e com área
 SQL_MERGE_IMOVEL = """
     MERGE INTO imovel_rural d
     USING (SELECT :cod_imovel cod_imovel, :municipio municipio, :estado estado, :area_ha area_ha,
-                  :situacao situacao, :geometria geometria, :geometria_wkb geometria_wkb,
+                  :situacao situacao, :geometria geometria,
                   :dataset_versao_id dataset_versao_id FROM dual) s
     ON (d.cod_imovel = s.cod_imovel)
     WHEN MATCHED THEN UPDATE SET d.municipio = s.municipio, d.estado = s.estado,
          d.area_ha = s.area_ha, d.situacao = s.situacao, d.geometria = s.geometria,
-         d.geometria_wkb = s.geometria_wkb, d.dataset_versao_id = s.dataset_versao_id
+         d.geometria_wkb = NULL, d.dataset_versao_id = s.dataset_versao_id
     WHEN NOT MATCHED THEN INSERT (cod_imovel, municipio, estado, area_ha, situacao,
-         geometria, geometria_wkb, dataset_versao_id)
+         geometria, dataset_versao_id)
          VALUES (s.cod_imovel, s.municipio, s.estado, s.area_ha, s.situacao,
-                 s.geometria, s.geometria_wkb, s.dataset_versao_id)
+                 s.geometria, s.dataset_versao_id)
 """
+# O WKB vai num UPDATE à parte (SQL_WKB_IMOVEL): como bind do MERGE ... FROM dual, o BLOB do
+# modo thin dava ORA-01461 / ORA-03106 nos polígonos grandes.
+SQL_WKB_IMOVEL = "UPDATE imovel_rural SET geometria_wkb = :geometria_wkb WHERE cod_imovel = :cod_imovel"
 
 SQL_QUARENTENA = """
     INSERT INTO registro_quarentena (execucao_id, numero_linha, campo, motivo, payload,
@@ -193,7 +196,7 @@ def gravar_imoveis(cur, dataset_versao_id: int, aprovados: list[Resultado]) -> N
     tipos = sdo.TiposSdo(cur.connection)
     # BLOB declarado: sem isso, no modo thin os bytes iriam como RAW (até 32 KB) e polígono grande
     # chegaria cortado.
-    cur.setinputsizes(geometria=tipos.geometria, geometria_wkb=oracledb.DB_TYPE_BLOB)
+    cur.setinputsizes(geometria=tipos.geometria)
     cur.executemany(
         SQL_MERGE_IMOVEL,
         [
@@ -204,12 +207,14 @@ def gravar_imoveis(cur, dataset_versao_id: int, aprovados: list[Resultado]) -> N
                 "area_ha": r.area_ha,
                 "situacao": r.situacao,
                 "geometria": tipos.converter(r.geometria, sdo.SRID_BANCO),
-                "geometria_wkb": wkb(r.geometria),
                 "dataset_versao_id": dataset_versao_id,
             }
             for r in aprovados
         ],
     )
+    cur.setinputsizes(geometria_wkb=oracledb.DB_TYPE_BLOB)
+    cur.executemany(SQL_WKB_IMOVEL, [{"geometria_wkb": wkb(r.geometria), "cod_imovel": r.cod_imovel}
+                                     for r in aprovados])
 
 
 def gravar_quarentena(cur, execucao_id: int, dataset_versao_id: int, reprovados: list[Resultado],
