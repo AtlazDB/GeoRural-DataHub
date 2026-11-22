@@ -2,7 +2,7 @@
 
 # Documentação - Sprint 3
 
-> Status da Sprint: Em andamento 🚧
+> Status da Sprint: Concluído! ✅
 
 ---
 
@@ -41,7 +41,7 @@ Nesta seção, detalhamos as histórias de usuário e seus respectivos **DoD (De
     
 - **Estimativa:** 5
     
-- **Status:** Planejada 📅
+- **Status:** Concluído! ✅
     
 - **Responsáveis:** Gabriel Rocha (Keycloak) e Gabriel Valente (gerenciamento de usuários)
     
@@ -72,7 +72,7 @@ Nesta seção, detalhamos as histórias de usuário e seus respectivos **DoD (De
     
 - **Estimativa:** 8
     
-- **Status:** Em andamento 🚧
+- **Status:** Concluído! ✅
     
 - **Responsáveis:** Leandro Henrique (processamento) e Rodolfo Corbalan (exibição das geometrias dos indicadores)
     
@@ -106,7 +106,7 @@ Nesta seção, detalhamos as histórias de usuário e seus respectivos **DoD (De
     
 - **Estimativa:** 8
     
-- **Status:** Em andamento 🚧
+- **Status:** Concluído! ✅
     
 - **Responsável:** Manuela Brito
     
@@ -140,7 +140,7 @@ Nesta seção, detalhamos as histórias de usuário e seus respectivos **DoD (De
     
 - **Estimativa:** 8
     
-- **Status:** Planejada 📅
+- **Status:** Concluído! ✅
     
 - **Responsável:** Gabriel Nunes
     
