@@ -27,6 +27,7 @@ Gabriel Nunes · Rodolfo Corbalan
    - [Mapeamento de colunas](#mapeamento-de-colunas)
    - [Quarentena](#quarentena)
    - [Imóveis rurais](#imóveis-rurais)
+   - [Indicadores](#indicadores)
    - [Rastreabilidade](#rastreabilidade)
    - [Usuários e perfis](#usuários-e-perfis)
 6. [Mensagens comuns e o que fazer](#mensagens-comuns-e-o-que-fazer)
@@ -472,6 +473,7 @@ perfil (veja [Perfis de acesso](#perfis-de-acesso)):
 | Dados | **Fontes de dados** | Ver as fontes, importar arquivos, acompanhar o processamento e mapear colunas |
 | Dados | **Quarentena** | Analisar e tratar os registros reprovados |
 | Consulta | **Imóveis rurais** | Consultar os imóveis no mapa e na tabela, com os indicadores |
+| Governança | **Indicadores** | Cadastrar, calcular, ligar/desligar indicadores e ver o resultado por município |
 | Governança | **Rastreabilidade** | Ver de onde veio o número de um indicador |
 | Administração | **Usuários e perfis** | Definir o que cada pessoa pode usar (somente Gestor) |
 
@@ -480,87 +482,154 @@ fica salva no navegador) e o botão **Sair**. Em telas estreitas, o menu mostra 
 
 ### Fontes de dados
 
-Tela usada pelo Operador de Dados. À esquerda fica a lista **Fontes cadastradas**; à direita, o
-card **Importar arquivo** e, abaixo dele, os **Arquivos recebidos** da fonte selecionada.
+Tela usada pelo Operador de Dados. Mostra as fontes em cards; clicar num card abre a página da
+fonte, com as abas **Recebimento**, **Arquivos recebidos**, **Mapeamento** e **Versões**.
 
+<!-- TODO: print novo da lista de fontes (cards) e da página da fonte com as abas -->
 <img width="1600" height="805" alt="image" src="https://github.com/user-attachments/assets/a25dae79-09bd-482a-b740-e559fda8cff4" />
 
+**A lista de fontes:**
 
-**Passo a passo:**
-
-1. **Selecionar a fonte** na lista à esquerda. Cada fonte mostra sigla, nome, órgão, formato, o
-   último arquivo recebido e o status (**Ativa**, **Sem arquivo** ou **Inativa**). Fontes coletadas
-   por link têm a etiqueta "link". Um aviso âmbar "N nova(s)" indica colunas novas sem mapeamento
-   (veja [Mapeamento de colunas](#mapeamento-de-colunas)).
-2. **Enviar o arquivo:** arraste o arquivo para a área "Arraste o arquivo ou clique para
-   selecionar", ou clique nela, e depois em **Iniciar importação**. Para escolher outro arquivo,
-   use **Trocar arquivo**. A barra mostra o progresso do envio e, em seguida, "Processando no
-   servidor…".
-3. **Processamento automático:** arquivos `.zip`, `.geojson` e `.json` são enviados ao Airflow assim
-   que o envio termina. Se o Airflow estiver fora do ar, a tela avisa, o arquivo fica como Recebido e
-   basta clicar em **Processar** depois.
-4. **Acompanhar o status** na lista **Arquivos recebidos**: Recebido, Processando, Processado,
-   Rejeitado ou Aguardando mapeamento. Enquanto houver arquivo processando, a lista se atualiza
-   sozinha a cada poucos segundos.
-5. **Ver o resultado:** ao concluir, aparece "Processado pelo Airflow" ou "Rejeitado no
-   processamento" (o motivo fica registrado na execução). Os registros inválidos ficam na
-   [Quarentena](#quarentena).
-6. **Processar de novo**, se necessário: arquivos Recebidos, Rejeitados ou Aguardando mapeamento
-   mostram o botão **Processar**.
-7. **Excluir** um arquivo rejeitado: o botão **Excluir** aparece só em arquivos Rejeitados. A
-   exclusão apaga o arquivo do catálogo e da zona bruta e não pode ser desfeita.
+- **Filtros no topo:** Todas, Ativas, Coleta automática, Upload e Desativadas, com a quantidade de
+  cada uma, e a busca por nome, sigla ou órgão.
+- **Cada card** mostra a sigla, a etiqueta **Coleta automática** (link) ou **Upload** (envio de
+  arquivo), o formato, o nome, o órgão, a data da última coleta ou envio e quantas colunas estão
+  **sem mapeamento**.
+- **A chave no canto do card** ativa ou desativa a fonte. Uma fonte **desativada** não recebe
+  arquivos nem coletas até ser religada; os dados que ela já gravou **continuam valendo** (não são
+  apagados).
+- **Grupos de fontes:** juntam cards numa "pasta" (ex.: uma camada que veio em vários pedaços,
+  cada um numa fonte). O grupo **só organiza a tela**: não muda o processamento nem os indicadores.
 
 **Cadastrar uma nova fonte:**
 
-As fontes por link da demonstração (`MUN-IAT`, `CAR-WFS`, `RL-IAT`, `FOCOS-IAT`) são cadastradas
-pelo seed (veja [Primeira carga de dados](#primeira-carga-de-dados)). Para cadastrar outra:
+As fontes da demonstração (`MUN-IAT`, `CAR-WFS`, `RL-IAT`, `FOCOS-IAT`) são cadastradas pelo seed
+(veja [Primeira carga de dados](#primeira-carga-de-dados)). Para cadastrar outra, clique em
+**Nova fonte** e preencha:
 
-1. Clique em **Nova fonte** (o botão vira **Fechar** enquanto o formulário está aberto).
-2. Preencha **Nome da fonte**, **Sigla** (até 12 caracteres, sem repetir uma existente),
-   **Formato**, **Órgão responsável** e **Periodicidade**.
-3. Em **Como os dados chegam**, escolha:
-   - **Envio de arquivo** — os arquivos serão enviados pela área de importação; ou
-   - **Link (coleta)** — o sistema baixa os dados de um endereço. Preencha o **Link de origem**
-     (serviço ArcGIS, WFS/GeoServer ou um arquivo zip, CSV ou GeoJSON para baixar), o **Método**
-     (GET ou POST), os **Cabeçalhos** em JSON, se o serviço exigir (não coloque senha nem token), e,
-     no POST, o **Corpo da requisição**. Use **Testar link** para conferir se o endereço responde
-     antes de salvar.
-4. Clique em **Cadastrar fonte**.
+| Campo | Como preencher |
+|---|---|
+| **Nome da fonte** | Nome por extenso, como aparece nos cards e nos indicadores. Ex.: "Terras Indígenas no Paraná (FUNAI)". |
+| **Sigla** | Curta, em maiúsculas, sem repetir outra fonte (ex.: `TI-FUNAI`). **Não muda depois**: é o nome da pasta dos arquivos da fonte na zona bruta. |
+| **Formato** | O que o arquivo ou o link **devolve**: **CSV**, **GeoJSON** ou **SHP**. Um serviço ArcGIS ou WFS com `f=geojson` ou `outputFormat=application/json` é **GeoJSON**, mesmo sendo um link. Formato errado faz a carga ler o conteúdo errado. |
+| **Órgão responsável** | Quem publica o dado. Quando ele vem por outro órgão, diga os dois: "FUNAI (via IAT/PR)". |
+| **Periodicidade** | De quanto em quanto tempo o dado muda na origem (diária, mensal, anual…). É informativa. |
+| **Como os dados chegam** | **Envio de arquivo**: alguém sobe o arquivo pela tela. **Link (coleta)**: o sistema baixa do endereço do órgão. Prefira o link quando ele existir: a fonte se atualiza sem ninguém precisar baixar e subir arquivo. |
+| **Link de origem** (só no link) | Endereço do serviço ArcGIS (`.../FeatureServer/0/query?where=1=1&outFields=*&f=geojson&outSR=4674`), do WFS/GeoServer (`...?service=WFS&request=GetFeature&typeNames=...&outputFormat=application/json`) ou de um arquivo zip, CSV ou GeoJSON. Para pegar só uma parte, filtre no próprio link (ex.: `CQL_FILTER=state%3D%27PR%27` no WFS, `where=` no ArcGIS). |
+| **Método** | Quase sempre **GET**. POST só se o serviço exigir; aí aparece o **Corpo da requisição**. |
+| **Cabeçalhos (JSON, opcional)** | Só se o serviço pedir (ex.: `{"Accept": "application/json"}`). **Nunca** coloque senha nem token: os cabeçalhos ficam gravados junto com a fonte. |
 
-**Coletar uma fonte por link:** clique no botão ▶ ("Executar agora: coletar o link") ao lado da
-fonte. O arquivo baixado aparece em **Arquivos recebidos** como um envio comum e é processado em
-seguida. Se o conteúdo for igual ao da última coleta, aparece "Sem mudança" e nada é gravado.
+Antes de salvar uma fonte por link, clique em **Testar link**: a tela diz se o endereço respondeu,
+quantos registros e quais colunas vieram.
 
-- O botão dispara a coleta no Airflow na hora; se ele estiver fora do ar, a tela avisa e é só tentar
-  de novo. Enquanto a coleta roda, o botão fica girando e a mensagem de andamento aparece embaixo da fonte. Serviços ArcGIS e WFS
-  são lidos em páginas; se faltar ou repetir algum registro, a coleta falha ("vieram X de Y") em
-  vez de gravar dado pela metade.
+> **Formatos de arquivo aceitos:** shapefile num `.zip` (com `.shp`, `.shx`, `.dbf` e `.prj`),
+> GeoJSON (`.geojson` ou `.json`) e CSV com a geometria numa coluna de texto WKT
+> (`POINT (-51.2 -25.4)`, `POLYGON (...)`) ou em duas colunas de latitude e longitude.
+
+**Ordem certa para uma fonte nova:**
+
+1. Cadastre a fonte e **teste o link** (ou envie o primeiro arquivo).
+2. Vá na aba **Mapeamento** e mapeie as colunas **antes** de coletar ou processar (veja
+   [Mapeamento de colunas](#mapeamento-de-colunas)). As colunas aparecem depois do teste do link ou
+   do primeiro arquivo.
+3. Só então clique em **Executar agora** (link) ou processe o arquivo.
+
+Se a carga rodar antes do mapeamento, o arquivo fica **Aguardando mapeamento** ou os registros vão
+todos para a quarentena; depois de mapear, use **Reprocessar** (veja abaixo).
+
+**Aba Recebimento:**
+
+- **Fonte por link:** mostra o link, a última coleta e a paginação. **Executar agora** baixa os
+  dados na hora. Serviços ArcGIS e WFS são lidos **em páginas** até o fim, conferindo o total; se
+  faltar ou repetir algum registro, a coleta falha ("vieram X de Y") em vez de gravar dado pela
+  metade. Se o conteúdo for igual ao da última coleta, a execução fica como **sem mudança** e nada é
+  reprocessado: por isso, **coletar de novo não corrige um mapeamento** (use **Reprocessar**).
+- **Fonte por envio de arquivo:** arraste o arquivo para a área de envio, ou clique nela, e depois
+  em **Iniciar importação**. Arquivos `.zip`, `.geojson`, `.json` e `.csv` vão para o Airflow assim
+  que o envio termina. Se o Airflow estiver fora do ar, a tela avisa e o arquivo fica como
+  Recebido, para clicar em **Processar** depois.
+
+**Aba Arquivos recebidos:**
+
+1. Cada arquivo mostra nome, tamanho, data, se veio por coleta ou envio, e o status: **Recebido**,
+   **Processando**, **Processado**, **Rejeitado** ou **Aguardando mapeamento**. Enquanto houver
+   arquivo processando, a lista se atualiza sozinha e mostra a barra de progresso.
+2. **Processar**: aparece nos arquivos Recebidos, Rejeitados ou Aguardando mapeamento.
+3. **Reprocessar**: aparece só no arquivo **Processado mais recente** da fonte (é ele que está
+   valendo). Use depois de mudar o mapeamento: o arquivo é lido de novo, sem precisar baixar ou
+   subir outra vez, e os dados atuais da fonte são trocados pelos da nova leitura.
+4. **Excluir**: só em arquivos Rejeitados. Apaga o arquivo do catálogo e da zona bruta e não pode
+   ser desfeito.
+5. Os registros reprovados ficam na [Quarentena](#quarentena). Para ver **quantos** foram válidos e
+   inválidos, confira as execuções da fonte: se **todos** foram reprovados, quase sempre é um campo
+   mapeado do jeito errado (abra um registro na Quarentena para ver o motivo).
+
+**Aba Versões:** cada carga processada gera uma versão dos dados da fonte, usada na rastreabilidade
+dos indicadores.
 
 ### Mapeamento de colunas
 
-<!-- TODO: print do modal "Mapear colunas" -->
+<!-- TODO: print da aba Mapeamento (colunas detectadas e mapeadas) -->
 
-Aberto pelo botão **#** ("Mapear colunas") ao lado de cada fonte, na tela Fontes de dados.
+Fica na aba **Mapeamento** da página da fonte. O mapeamento diz, coluna por coluna, para onde vai
+cada dado e que regras ele precisa cumprir. **Só o que está mapeado é gravado**; as colunas sem
+mapeamento não se perdem: ficam guardadas como atributos de cada registro na zona bruta e na
+quarentena.
 
-1. Em **Colunas detectadas**, veja as colunas que chegaram nos arquivos da fonte, com tipo e
-   exemplos de valores. Cada uma aparece como **Mapeada**, **Nova** ou **Ausente**. As colunas só
-   aparecem depois que o primeiro arquivo da fonte é lido.
-2. Clique em **Mapear** numa coluna **Nova** e preencha:
-   - **Tabela de destino** e **Campo de destino** (por exemplo, `imovel_rural` / `area_ha`);
-   - **Tipo de dado**: texto, inteiro, decimal, data, booleano ou geometria;
-   - **Regras gerais**: Obrigatório; Chave (identifica o registro — uma coluna chave é sempre
-     obrigatória); Bloquear regressão (reprova o registro que chega vazio quando o valor atual
-     está preenchido);
-   - para **data**: o formato na origem (ex.: `dd/MM/yyyy`);
-   - para **texto**: domínio de valores, conferência de existência em outra tabela (município ou
-     imóvel) e validação de CPF/CNPJ;
-   - para **geometria**: a política para geometria inválida — **Quarentena** (reprova e isola o
-     registro) ou **Corrigir e registrar** — e se deve **conferir se está no Paraná** (totalmente
-     fora reprova; parcialmente fora passa, sem recorte).
-3. Clique em **Salvar mapeamento**.
-4. Em **Colunas mapeadas**, use **Remover** para desfazer um mapeamento.
-5. Depois de mapear, volte à lista de arquivos e clique em **Processar** nos arquivos que estavam
-   aguardando mapeamento.
+1. Em **Colunas detectadas**, veja as colunas que chegaram, com tipo percebido e exemplos. Cada uma
+   aparece como **Mapeada**, **Nova** ou **Ausente**.
+2. Clique em **Mapear** numa coluna e preencha os campos (tabela abaixo).
+3. Salve. A coluna passa para **Colunas mapeadas**, onde dá para **Editar** ou **Remover**.
+4. Se houver arquivo **aguardando mapeamento**, aparece uma faixa amarela com o botão para
+   reprocessar todos. Se o arquivo já tinha sido processado, use **Reprocessar** na aba
+   **Arquivos recebidos**.
+
+**Campos do mapeamento:**
+
+| Campo | Como preencher |
+|---|---|
+| **Tabela de destino** | Onde o dado vai morar. As tabelas próprias (`imovel_rural`, `car_reserva_legal`, `foco_calor`, `municipio`) são das fontes do CAR, dos focos e dos municípios. **Qualquer outra fonte** (desmatamento, áreas protegidas, embargos…) vai para **`input_feature`**, o destino genérico que os indicadores cadastrados pela tela usam. |
+| **Campo de destino** | O campo da tabela. Na `input_feature`: **`geometria`** (o desenho), **`categoria`** (um texto para filtrar no indicador, ex.: a classe "DESMATAMENTO"), **`data_referencia`** (a data da observação, usada no filtro "A partir de") e **`valor`** (um número declarado pela fonte). Um campo já usado por outra coluna aparece desabilitado. |
+| **Tipo de dado** | O tipo do **valor que vem da origem**: TEXTO, INTEIRO, DECIMAL, DATA, BOOLEANO ou GEOMETRIA. O valor que não converte vai para a quarentena ("Valor não converte para DATA", por exemplo). |
+| **Obrigatório** | Marque quando o registro não serve sem esse valor; vazio vai para a quarentena. Se a tela avisar "A tabela não aceita este campo vazio", **marque**: sem isso, um valor vazio derruba a carga inteira em vez de ir para a quarentena. **A geometria é sempre obrigatória.** |
+| **Chave (identifica o registro)** | A coluna que diz "é o mesmo registro" de uma carga para a outra (ex.: `cod_imovel` no CAR, o código IBGE nos municípios). Com chave, a carga atualiza o que mudou; sem chave, cada carga substitui a anterior inteira. Uma chave é sempre obrigatória. Na dúvida, **não marque**. |
+| **Bloquear regressão** | Reprova o registro que chega vazio num campo que hoje está preenchido (evita apagar um dado bom com uma carga ruim). |
+
+**Só para GEOMETRIA:**
+
+| Campo | Como preencher |
+|---|---|
+| **Tipo esperado** | **Polígono** para áreas (imóvel, reserva legal, município, desmatamento, unidade de conservação…), **Ponto** para qualquer ponto (focos de calor e outros) e **Linha** para rios e estradas. Polígono aceita multipolígono, e assim por diante. Uma geometria de outro tipo é reprovada. |
+| **Política para geometria inválida** | **Corrigir e registrar** (recomendado): o sistema conserta o desenho (contorno que se cruza, ponto repetido…), grava e anota a correção. **Quarentena**: reprova e isola o registro para alguém corrigir à mão. |
+| **Conferir se está no Paraná** | Marque nas fontes do PR: um desenho **totalmente fora** do estado é reprovado; **parcialmente fora** passa, sem recorte. Depende da malha de municípios carregada (`MUN-IAT`); sem ela, a carga avisa e não valida. Não marque na própria fonte de municípios. |
+
+**Só para DATA:**
+
+| Campo | Como preencher |
+|---|---|
+| **Formato da data na origem** | A máscara do jeito que a data vem. **Vazio vale `DD/MM/YYYY`.** Exemplos: `2006-09-12` → `YYYY-MM-DD`; `2015/03/11 17:19:00` → `YYYY/MM/DD HH24:MI:SS`. Se a coluna mistura formatos, separe com `\|` (vale o primeiro que converter). Milissegundos desde 1970 (comum no ArcGIS) → `EPOCH_MS`. **Formato errado reprova todos os registros** ("Valor não converte para DATA"): confira um exemplo da coluna antes. |
+
+**Só para DECIMAL:** marque **"A origem usa vírgula como separador decimal"** quando o número vem
+como `25,9`.
+
+**Só para TEXTO:**
+
+| Campo | Como preencher |
+|---|---|
+| **Domínio de valores** | Lista dos valores aceitos (ex.: situação do CAR). Valor fora da lista vai para a quarentena. |
+| **Conferir existência em** | Confere se o valor existe em outra tabela (município ou imóvel). Só **valida**: não liga o registro a ela. |
+| **Validar CPF/CNPJ** | Reprova documentos com dígito verificador errado. |
+
+**Exemplos que funcionaram:**
+
+- **Desmatamento PRODES (link WFS do INPE)** para o IDESMAT: `geometry` → `input_feature.geometria`
+  (Polígono, obrigatório, Corrigir e registrar, conferir no PR); `main_class` →
+  `input_feature.categoria` (TEXTO, obrigatório); `image_date` → `input_feature.data_referencia`
+  (DATA, obrigatório, formato `YYYY-MM-DD`).
+- **Camadas só de desenho** (terras indígenas, unidades de conservação, quilombolas, embargos):
+  basta a `geometry` → `input_feature.geometria`, com as mesmas opções acima.
+- **CSV de pontos:** a coluna da geometria (WKT ou latitude/longitude) como GEOMETRIA **Ponto**
+  obrigatória; uma área com vírgula como DECIMAL com a caixinha da vírgula → `valor`.
 
 ### Quarentena
 Registros que não cumpriram alguma regra. O dado original nunca é alterado: a correção é guardada
@@ -651,6 +720,75 @@ tabela de imóveis — com o total ao lado do título — e o card de indicadore
    carregar dados novos, use **Recalcular**. O cálculo vale para todos os imóveis e pode demorar.
    Para ver como o número foi obtido, clique em **De onde veio este número?**.
 
+### Indicadores
+
+<!-- TODO: print da lista de indicadores e do formulário "Novo indicador" -->
+
+Tela em **Governança > Indicadores**. Aqui ficam os indicadores montados a partir de uma fonte de
+dados, de um modelo de cálculo pronto e de faixas de status. O **IRL** e o **IFC** são fixos: não
+aparecem nesta lista e são vistos no card do imóvel (veja [Imóveis rurais](#imóveis-rurais)).
+
+**A lista:** sigla, nome, modelo, unidade, fonte, data de cadastro e situação. Dá para buscar por
+sigla ou nome, filtrar por fonte e ver Todos, Ativos ou Inativos.
+
+- **Chave Ativo/Inativo:** um indicador inativo não é mais calculado, mas os resultados já
+  calculados continuam valendo e podem ser consultados.
+- **Calcular:** calcula o indicador para todos os imóveis (cerca de 559 mil). Uma barra mostra o
+  andamento ("Gravando os resultados 94%"); leva alguns minutos. Só quem opera dados vê o botão, e
+  só em indicador ativo.
+- **Por município:** abre o resultado mais recente de cada imóvel agrupado pelo município: quantos
+  imóveis, quantos em cada status, a média simples do valor e a **soma** do numerador (hectares
+  cobertos, focos…). Os números seguem o formato brasileiro: `1.973.144,881` são cerca de 1,97
+  milhão. Imóvel sem município aparece na linha **Sem município**.
+
+**Cadastrar um indicador:** clique em **+ Novo indicador** e preencha. **Cadastrar não calcula**:
+o cálculo é um passo à parte (botão **Calcular**).
+
+| Campo | Como preencher |
+|---|---|
+| **Sigla** | De 2 a 10 letras maiúsculas ou números, começando com letra (ex.: `IDESMAT`). **Não pode repetir**, nem a de um indicador desativado. |
+| **Nome** e **Unidade** | Nome por extenso e a unidade do valor: `%` na cobertura de área, `focos/1000` na densidade de pontos. |
+| **Descrição** (opcional) | Uma frase dizendo o que o número mede. Ajuda quem lê o resultado depois. |
+| **Fonte de dados** | A fonte principal. Ela precisa **já ter dados processados** no destino genérico (`input_feature`), com a geometria mapeada; senão aparece "A fonte N ainda não tem dados processados no insumo genérico". |
+| **Modelo de cálculo** | Veja a tabela de modelos abaixo. O tipo de geometria da fonte tem que combinar com o modelo. |
+| **Somar outras fontes** (opcional) | Para um indicador feito de várias camadas (ex.: áreas protegidas = UC + terra indígena + quilombola). Na cobertura, a área coberta por mais de uma fonte conta **uma vez só**. Todas precisam ter o mesmo tipo de geometria da principal. |
+| **Pontos a cada quantos hectares** | Só na densidade de pontos: a base da conta (ex.: `1000` → focos a cada 1.000 ha). |
+| **Só a categoria** (opcional) | Usa só as feições cuja `categoria` é igual a este texto, **exatamente como vem na fonte** (maiúsculas contam; ex.: `DESMATAMENTO`). Vazio = todas as feições, sem filtro. |
+| **A partir de** (opcional) | Usa só as feições com `data_referencia` nesse dia ou depois (ex.: desmatamento após 22/07/2008). A fonte precisa ter a data mapeada em `data_referencia`. Vazio = sem filtro. |
+| **Mínimo exigido (%)** (opcional) | Só na cobertura de área, quando **mais é melhor**: quanto do imóvel a lei exige (ex.: 20% de Reserva Legal no Paraná). Com ele, o imóvel mostra o déficit ou o excedente em hectares. Em indicador onde **qualquer valor é ruim** (desmatamento, embargo), deixe vazio. |
+| **Faixas de status** | Em **ordem crescente** de valor. Cada faixa tem um status (Conforme, Alerta, Crítico ou Validação), um limite e a opção **inclui o limite**. A **última vale para tudo acima** da anterior e não tem limite. |
+
+**Modelos de cálculo:**
+
+| Modelo | O que calcula | A fonte precisa ter | Exemplo |
+|---|---|---|---|
+| **Densidade de pontos** | Pontos dentro do imóvel, por área | Só pontos | Focos de calor a cada 1.000 ha |
+| **Cobertura de área** | Quanto do imóvel (em %) é coberto pelos polígonos da fonte | Só polígonos | Desmatamento, áreas protegidas, embargos, vegetação nativa |
+| **Cobertura dentro de uma camada** | Quanto de uma **camada base** dentro do imóvel é coberto pela fonte | Só polígonos, nas duas | APP conservada = APP com vegetação nativa ÷ APP total |
+
+Na **cobertura dentro de uma camada**, a fonte é a cobertura (ex.: vegetação) e a **Camada base**
+(o denominador, ex.: APP) é marcada num bloco próprio. Se a base veio em vários pedaços (APP,
+APP02, APP03…), marque todos: o cálculo junta. Imóvel sem a camada base não recebe resultado.
+
+**Como pensar as faixas:**
+
+- **Qualquer valor acima de zero é problema** (desmatamento, sobreposição com área protegida,
+  embargo): **Conforme** até `0` (inclui o limite) e **Crítico** acima.
+- **Mais é melhor** (vegetação nativa, reserva legal): **Crítico** até o mínimo (sem incluir o
+  limite) e **Conforme** acima; preencha também o **Mínimo exigido**.
+- Para uma zona de atenção, acrescente uma faixa **Alerta** entre as duas.
+
+**Exemplos de indicadores cadastrados:**
+
+| Sigla | Fonte(s) | Modelo | Filtros | Faixas |
+|---|---|---|---|---|
+| `IDESMAT` | Desmatamento PRODES (`MTA`) | Cobertura de área | Categoria `DESMATAMENTO`, a partir de 22/07/2008 | Conforme até 0 · Crítico acima |
+| `ISAP` | `TI-FUNAI` + `UC-EST`, `UC-FED`, `QUIL-INCRA` | Cobertura de área | — | Conforme até 0 · Crítico acima |
+| `IAE` | `EMB-IBAMA` + `EMB-ICMBIO` | Cobertura de área | — | Conforme até 0 · Crítico acima |
+
+> **Um indicador não pode ser editado.** Para mudar a regra, desative o indicador e cadastre outro
+> com uma sigla nova. Confira tudo (principalmente a categoria e a data) antes de salvar.
+
 ### Rastreabilidade
 
 Mostra o caminho completo de um indicador, do resultado até o arquivo de origem.
@@ -706,6 +844,11 @@ usar no sistema. Os demais perfis não veem este item no menu.
 | "Você não pode remover o seu próprio perfil de Gestor." | Tentativa de tirar o próprio perfil de Gestor | Peça a outro Gestor, se for mesmo necessário |
 | "O serviço de autenticação está indisponível. Tente novamente em instantes." | O Keycloak está fora do ar | Confirme que o container `keycloak` está rodando e tente de novo |
 | "Usuário não encontrado" | A pessoa não existe mais no Keycloak | Atualize a lista; confirme com a equipe técnica |
+| "A fonte N ainda não tem dados processados no insumo genérico." (Novo indicador) | A fonte ainda não gravou nada em `input_feature`: nunca foi processada, foi processada sem mapeamento ou teve todos os registros reprovados | Confira o mapeamento (a `geometry` precisa estar mapeada), use **Reprocessar** e veja os válidos da execução |
+| Execução com **0 válidos** e todos inválidos | Uma regra do mapeamento barra todo mundo | Abra um registro da fonte na **Quarentena** e leia o motivo; corrija o mapeamento e use **Reprocessar** |
+| "Valor não converte para DATA." (Quarentena) | O formato da data na origem não bate com a máscara do mapeamento (vazio = `DD/MM/YYYY`) | Edite a coluna no mapeamento e ponha a máscara certa (ex.: `YYYY-MM-DD`); depois **Reprocessar** |
+| Execução "sem mudança" depois de corrigir o mapeamento | A coleta compara o conteúdo do link, não o mapeamento | Use **Reprocessar** no arquivo, em vez de **Executar agora** |
+| "Por município" mostra quase tudo em **Sem município** | Os imóveis estão sem o município preenchido | Rode a DAG `calcular_indicadores` (ela preenche o município pelo código do CAR) |
 
 
 ## Limitações conhecidas
@@ -714,6 +857,12 @@ usar no sistema. Os demais perfis não veem este item no menu.
   (`http://localhost:8081/admin/master/console/`), não pela tela **Usuários e perfis**, que só
   define perfis de quem já existe.
 - A mudança de perfil vale no **próximo login** (ou em até 15 minutos).
+- **Indicador não tem edição** e a sigla não pode ser reaproveitada: para mudar uma regra, é preciso
+  desativar e cadastrar outro.
+- Os seletores de fonte do **Novo indicador** e do filtro da **Quarentena** ainda listam fontes
+  desativadas: escolha só fontes ativas.
+- O **Testar link** de um serviço ArcGIS com mais de 2.000 registros avisa que "a coleta faz um
+  pedido só". O aviso está desatualizado: a coleta lê em páginas e traz tudo.
 - Os perfis liberam telas e ações **para todos os dados**: ainda não há restrição por município nem
   permissões mais finas dentro de cada perfil (previstas para uma próxima etapa).
 - A distribuição de permissões por perfil é a configuração atual e ainda será validada com o Product
