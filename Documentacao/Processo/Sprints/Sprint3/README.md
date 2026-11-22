@@ -195,7 +195,8 @@ Para o fechamento da Sprint 3, a equipe deve atender aos seguintes requisitos ge
 
 # BurndownChart da Sprint
 
-> Será incluído ao longo da Sprint.
+<img width="1219" height="578" alt="Captura de tela 2026-11-22 105200" src="https://github.com/user-attachments/assets/671e0a58-b9ab-40ef-a33c-1f4c58c18c6f" />
+
 
 ---
  # 🎥 Demonstração da aplicação
