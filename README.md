@@ -50,7 +50,7 @@ Desenvolvimento do **GeoRural DataHub**, uma plataforma web com **Spring Boot** 
 | :----------: | :----: | :-----: | :----------: | :----: | :----: |
 | 🔖 Sprint 1 | 07/09  | 27/09 |   [Sprint 1](./Documentacao/Processo/Sprints/Sprint1/README.md)             |   [`vídeo disponível`](https://youtu.be/QcErlgeITU0)          |  Concluído ✅    |
 | 🔖 Sprint 2 | 05/10  | 25/10 |   [Sprint 2](./Documentacao/Processo/Sprints/Sprint2/README.md)             |   [`vídeo disponível`](https://youtu.be/OA_OV9PeG_U)            |  Concluído ✅    |
-| 🔖 Sprint 3 | 02/11  | 22/11 |   [Sprint 3](./Documentacao/Processo/Sprints/Sprint3/README.md)             |   -            |  Em andamento 🚧    |
+| 🔖 Sprint 3 | 02/11  | 22/11 |   [Sprint 3](./Documentacao/Processo/Sprints/Sprint3/README.md)             |   -            |  Concluído ✅   |
 
 ---
 ## 💻 Tecnologias <a id="tecnologias"></a>
