@@ -128,6 +128,14 @@ docker compose logs -f keycloak    # logs do login
 docker compose restart backend     # reinicia so o back
 ```
 
+## Coleta automatica
+
+O back confere de hora em hora quais fontes por link venceram (pela `periodicidade` ou pelo `cron`
+da fonte) e dispara a coleta delas, pelo mesmo caminho do botao Executar. A conferencia e so uma
+consulta no banco: o Airflow so e chamado para a fonte que venceu, porque cada disparo de DAG tem
+custo. A primeira coleta de cada fonte e manual; uma fonte que falhou espera o proximo periodo.
+Para desligar: `COLETA_AUTOMATICA_HABILITADA=false` no `.env` e `./deploy.sh`.
+
 ## Armadilhas conhecidas
 
 - **O realm so e importado na primeira subida do Keycloak.** Mudancas no

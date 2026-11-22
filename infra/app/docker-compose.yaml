@@ -32,6 +32,9 @@ services:
       - SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI=http://keycloak:8080/realms/georural/protocol/openid-connect/certs
       - KEYCLOAK_URL=http://keycloak:8080
       - KEYCLOAK_BACKEND_SECRET=${KEYCLOAK_BACKEND_SECRET:?defina no .env}
+      # Coleta automática das fontes por link, pela periodicidade de cada uma. A verificação é no back
+      # (consulta no banco); o Airflow só é chamado para a fonte que venceu. "false" desliga.
+      - COLETA_AUTOMATICA_HABILITADA=${COLETA_AUTOMATICA_HABILITADA:-true}
     # O back le ~/.oci/config (ConfigFileAuthenticationDetailsProvider). A pasta e montada
     # em /root/.oci e tambem no caminho original, para o key_file do config funcionar
     # tanto com "~/.oci/..." quanto com caminho absoluto.
