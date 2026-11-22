@@ -130,7 +130,11 @@ class Tratada:
         self.destinos: list[Destino] = []
         with con.cursor() as cur:
             for tabela in tabelas:
-                cur.execute("SELECT LOWER(column_name) FROM user_tab_columns WHERE table_name = UPPER(:t)", t=tabela)
+                # all_tab_columns do schema da sessão, não user_tab_columns: com o usuário do Airflow
+                # separado (GEORURAL_DB_SCHEMA), as tabelas são de outro dono e a user_ voltaria vazia.
+                cur.execute("SELECT LOWER(column_name) FROM all_tab_columns "
+                            "WHERE owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AND table_name = UPPER(:t)",
+                            t=tabela)
                 colunas = {c for (c,) in cur}
                 if "hash_registro" not in colunas:
                     raise FaltaMigration(f"A tabela {tabela} não tem a coluna hash_registro: aplique as migrations "
