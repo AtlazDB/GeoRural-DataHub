@@ -19,7 +19,6 @@ Gabriel Nunes · Rodolfo Corbalan
    - [Front-end](#front-end)
    - [Primeira carga de dados](#primeira-carga-de-dados)
    - [Usuários de teste](#usuários-de-teste)
-   - [Ambiente em nuvem](#ambiente-em-nuvem)
 5. [Como usar](#como-usar)
    - [Entrar e sair](#entrar-e-sair)
    - [Perfis de acesso](#perfis-de-acesso)
@@ -339,7 +338,7 @@ espaciais. A plataforma:
   GeoRural (os quatro do sistema e os combinados, que viram *composite roles* no Keycloak) e é
   restrita ao Gestor.
 - A coleta automática fica desligada por padrão no back-end (`COLETA_AUTOMATICA_HABILITADA`), para
-  não coletar dos serviços públicos a partir do computador de quem desenvolve; no ambiente em nuvem
+  não coletar dos serviços públicos a partir do computador de quem desenvolve; em produção
   ela vem ligada.
 
 **Usabilidade e confiabilidade**
@@ -451,15 +450,6 @@ O realm importado traz quatro usuários para o ambiente de desenvolvimento, todo
 > **Só para desenvolvimento.** Em um ambiente real, troque ou remova esses usuários e defina uma
 > senha própria para o administrador do Keycloak.
 
-### Ambiente em nuvem
-
-A aplicação também está publicada na Oracle Cloud, em
-**https://georural.168-138-124-82.sslip.io**. Não precisa instalar nada: abra o endereço no
-navegador e entre com o usuário que o Gestor cadastrou para você (veja
-[Cadastrar um novo usuário](#cadastrar-um-novo-usuário)). Nesse ambiente a coleta automática das
-fontes por link está ligada. A publicação (back-end, Keycloak e Airflow) está descrita em
-`infra/app/README.md`.
-
 
 ## Como usar
 
@@ -467,9 +457,8 @@ fontes por link está ligada. A publicação (back-end, Keycloak e Airflow) est�
 
 <img width="1600" height="900" alt="Tela de login do GeoRural DataHub" src="Documentacao/Manual/imagens/01-login.png" />
 
-Ao abrir o sistema (`http://localhost:5173` no seu computador, ou o endereço do
-[ambiente em nuvem](#ambiente-em-nuvem)), se você ainda não estiver conectado, o navegador vai para
-a tela **Entrar na sua conta** do GeoRural DataHub. Ela é do Keycloak, o servidor de identidade do
+Ao abrir o sistema (`http://localhost:5173`), se você ainda não estiver conectado, o navegador vai
+para a tela **Entrar na sua conta** do GeoRural DataHub. Ela é do Keycloak, o servidor de identidade do
 sistema: a sua senha não passa pelo GeoRural.
 
 1. Digite o **Nome de usuário ou e-mail** e a **Senha**. O ícone de olho mostra a senha digitada.
